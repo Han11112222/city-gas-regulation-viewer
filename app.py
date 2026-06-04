@@ -42,42 +42,52 @@ def extract_text_from_pdf(file_name):
         return f"❌ PDF 읽기 오류: {e}"
     return text
 
-# --- 구글 시트 데이터 로드 및 전처리 함수 ---
+# --- 구글 시트 데이터 로드 및 전처리 함수 (스마트 헤더 탐색 적용) ---
 @st.cache_data(ttl=300)
 def load_cleaned_data(sheet_name):
     try:
         encoded_sheet_name = urllib.parse.quote(sheet_name)
         csv_url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&sheet={encoded_sheet_name}"
         
-        df = pd.read_csv(csv_url, dtype=str)
+        # 이름표(header)를 무시하고 엑셀 원본 그대로 가져오기
+        df_raw = pd.read_csv(csv_url, dtype=str, header=None)
+        df_raw = df_raw.dropna(how='all', axis=0).dropna(how='all', axis=1)
         
-        # 1. 완벽히 비어있는 행과 열 삭제
-        df = df.dropna(how='all', axis=0).dropna(how='all', axis=1)
-        
-        if not df.empty and len(df.columns) > 0:
-            # 2. 컬럼명 중복 방지 로직
-            new_cols = []
-            for i, c in enumerate(df.columns):
-                c_str = str(c).strip()
-                if "Unnamed" in c_str or c_str == "":
-                    # 빈 컬럼은 고유한 이름 부여
-                    new_name = f"공란_{i}"
-                else:
-                    new_name = c_str
-                
-                base_name = new_name
-                suffix = 1
-                while new_name in new_cols:
-                    new_name = f"{base_name}_{suffix}"
-                    suffix += 1
-                new_cols.append(new_name)
-                
-            df.columns = new_cols
+        if df_raw.empty:
+            return pd.DataFrame()
             
-            # 3. 셀 병합 빈칸을 이전 일자로 채우기
+        # 1. 진짜 이름표(헤더)가 있는 행 찾기
+        header_idx = 0
+        for i in range(min(10, len(df_raw))):
+            row_vals = df_raw.iloc[i].fillna("").astype(str).tolist()
+            # '일자', '연도', '내용', '사유' 중 하나라도 포함된 줄을 진짜 헤더로 간주
+            if any(keyword in val for val in row_vals for keyword in ["일자", "연도", "내용", "사유"]):
+                header_idx = i
+                break
+                
+        # 2. 찾은 행을 진짜 이름표로 설정하고 중복 방지 처리
+        headers = df_raw.iloc[header_idx].fillna("").astype(str)
+        new_cols = []
+        for j, c in enumerate(headers):
+            c_str = c.strip()
+            if c_str == "" or "Unnamed" in c_str or c_str == "nan":
+                c_str = f"공란_{j}"
+            
+            base_name = c_str
+            suffix = 1
+            while c_str in new_cols:
+                c_str = f"{base_name}_{suffix}"
+                suffix += 1
+            new_cols.append(c_str)
+            
+        # 3. 진짜 헤더 그 다음 줄부터를 알맹이 데이터로 저장
+        df = df_raw.iloc[header_idx + 1:].copy()
+        df.columns = new_cols
+        
+        # 4. 일자(첫 번째 열) 셀 병합된 빈칸 채우기
+        if not df.empty:
             df.iloc[:, 0] = df.iloc[:, 0].replace(r'^\s*$', np.nan, regex=True).ffill()
         
-        # 4. 남은 빈 셀 처리
         df = df.fillna("")
         return df
     except Exception as e:
@@ -102,10 +112,10 @@ def render_tab_content(df, tab_name):
     df[date_col] = df[date_col].astype(str).str.strip()
     
     # 드롭다운 필터용 일자 목록 생성
-    unique_dates = sorted([d for d in df[date_col].unique() if d and d != "nan"], reverse=True)
+    unique_dates = sorted([d for d in df[date_col].unique() if d and d != "nan" and not d.startswith("공란_")], reverse=True)
 
     selected_date = st.selectbox(
-        f"📅 조회할 일자 선택 ({tab_name})", 
+        f"📅 조회할 {date_col if not date_col.startswith('공란_') else '일자'} 선택 ({tab_name})", 
         ["전체 보기"] + unique_dates, 
         key=f"select_{tab_name}"
     )
@@ -114,15 +124,13 @@ def render_tab_content(df, tab_name):
     if selected_date != "전체 보기":
         filtered_df = filtered_df[filtered_df[date_col] == selected_date]
 
-    # 내부 인덱스 초기화로 KeyError 방지
     filtered_df = filtered_df.reset_index(drop=True)
 
     st.markdown(f"##### 📊 개정 이력 목록")
     if not filtered_df.empty:
-        # 화면 출력용 데이터프레임 (인덱스를 1부터 시작)
         display_df = filtered_df.copy()
         
-        # [핵심 수정] '공란_'으로 시작하는 쓸모없는 유령 열은 화면에 표를 그릴 때 아예 통째로 빼버립니다. (중복 이름 에러 완벽 해결)
+        # 쓸모없는 '공란_' 열은 표에서 완벽히 제외
         valid_display_cols = [col for col in display_df.columns if not col.startswith("공란_")]
         display_df = display_df[valid_display_cols]
         
@@ -140,7 +148,6 @@ def render_tab_content(df, tab_name):
         row_options = []
         for idx, row in filtered_df.iterrows():
             hint = f"[{row[date_col]}] "
-            # '공란_' 열이 아닌 진짜 데이터가 있는 두 번째 컬럼 찾기
             valid_cols_for_hint = [c for c in df.columns if not c.startswith("공란_")]
             second_col = valid_cols_for_hint[1] if len(valid_cols_for_hint) > 1 else date_col
             hint += f"{str(row[second_col])[:30]}..."
@@ -155,7 +162,6 @@ def render_tab_content(df, tab_name):
         
         chosen_row = filtered_df.loc[selected_idx]
         
-        # '공란_' 열을 제외한 유효한 컬럼만 뷰어에 표시
         valid_cols = [c for c in df.columns if not c.startswith("공란_")]
         num_valid_cols = len(valid_cols)
         
