@@ -55,7 +55,7 @@ def load_cleaned_data(sheet_name):
         df = df.dropna(how='all', axis=0).dropna(how='all', axis=1)
         
         if not df.empty and len(df.columns) > 0:
-            # 2. [핵심 수정] 컬럼명 중복 방지 로직 (AttributeError 원천 차단)
+            # 2. 컬럼명 중복 방지 로직
             new_cols = []
             for i, c in enumerate(df.columns):
                 c_str = str(c).strip()
@@ -65,7 +65,6 @@ def load_cleaned_data(sheet_name):
                 else:
                     new_name = c_str
                 
-                # 만약 이미 존재하는 컬럼명이라면 뒤에 숫자를 붙여 중복 방지
                 base_name = new_name
                 suffix = 1
                 while new_name in new_cols:
@@ -100,7 +99,6 @@ def render_tab_content(df, tab_name):
     # 첫 번째 열을 일자 컬럼으로 지정
     date_col = df.columns[0] 
 
-    # 에러가 났던 부분: 이제 date_col이 무조건 고유하므로 DataFrame이 아닌 Series로 정상 인식됩니다.
     df[date_col] = df[date_col].astype(str).str.strip()
     
     # 드롭다운 필터용 일자 목록 생성
@@ -123,12 +121,12 @@ def render_tab_content(df, tab_name):
     if not filtered_df.empty:
         # 화면 출력용 데이터프레임 (인덱스를 1부터 시작)
         display_df = filtered_df.copy()
+        
+        # [핵심 수정] '공란_'으로 시작하는 쓸모없는 유령 열은 화면에 표를 그릴 때 아예 통째로 빼버립니다. (중복 이름 에러 완벽 해결)
+        valid_display_cols = [col for col in display_df.columns if not col.startswith("공란_")]
+        display_df = display_df[valid_display_cols]
+        
         display_df.index = range(1, len(display_df) + 1)
-        
-        # '공란_'으로 시작하는 임시 열 이름은 표에 그릴 때만 안 보이게 빈칸으로 처리
-        display_cols = ["" if col.startswith("공란_") else col for col in display_df.columns]
-        display_df.columns = display_cols
-        
         st.table(display_df)
     else:
         st.write("선택한 조건의 데이터가 없습니다.")
@@ -142,7 +140,9 @@ def render_tab_content(df, tab_name):
         row_options = []
         for idx, row in filtered_df.iterrows():
             hint = f"[{row[date_col]}] "
-            second_col = df.columns[1] if len(df.columns) > 1 else date_col
+            # '공란_' 열이 아닌 진짜 데이터가 있는 두 번째 컬럼 찾기
+            valid_cols_for_hint = [c for c in df.columns if not c.startswith("공란_")]
+            second_col = valid_cols_for_hint[1] if len(valid_cols_for_hint) > 1 else date_col
             hint += f"{str(row[second_col])[:30]}..."
             row_options.append((idx, hint))
             
