@@ -12,9 +12,9 @@ st.markdown("구글 스프레드시트(요약)와 깃허브 PDF(규정 전문)�
 # --- 구글 시트 및 PDF 파일 매핑 설정 ---
 SHEET_ID = "1sFagZeEQlp2UMxUCCT96QPQm2bqG_YVMRXU0cgErteA"
 FILE_MAP = {
-    "2023년": "1. 2023년_도시가스 공급규정 변경..pdf",
-    "2024년": "1. 2024년_도시가스 공급규정 변경..pdf",
-    "2025년": "1. 2025년_도시가스 공급규정 변경..pdf"
+    "2023": "1. 2023년_도시가스 공급규정 변경..pdf",
+    "2024": "1. 2024년_도시가스 공급규정 변경..pdf",
+    "2025": "1. 2025년_도시가스 공급규정 변경..pdf"
 }
 
 # --- PDF 전문 텍스트 추출 함수 ---
@@ -42,19 +42,22 @@ def extract_text_from_pdf(file_name):
     return text
 
 # --- 구글 시트 데이터 로드 및 전처리 함수 ---
-@st.cache_data(ttl=300)  # 5분 캐시
+@st.cache_data(ttl=300)
 def load_cleaned_data(sheet_name):
     try:
         encoded_sheet_name = urllib.parse.quote(sheet_name)
         csv_url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv&sheet={encoded_sheet_name}"
         df = pd.read_csv(csv_url)
         
-        # Unnamed로 시작하는 유령 컬럼 완벽 제거
+        # 1. Unnamed 유령 컬럼 완벽 제거
         df = df.loc[:, ~df.columns.str.contains('^Unnamed', na=False)]
         
-        # 빈 셀 처리 및 공백 정제
+        # 2. 모든 데이터가 비어있는 빈 행(Row) 삭제
+        df = df.dropna(how='all')
+        
+        # 3. 빈 셀 처리 및 공백 정제
         df = df.fillna("")
-        df.columns = [col.strip() for col in df.columns]
+        df.columns = [str(col).strip() for col in df.columns]
         return df
     except Exception as e:
         st.error(f"'{sheet_name}' 데이터를 가져오는 중 에러가 발생했습니다.")
@@ -72,59 +75,49 @@ def render_tab_content(df, tab_name):
         st.info("시트에 데이터가 없거나 로드되지 않았습니다.")
         return
 
-    # [보완] 엄격한 연도/구분 컬럼 감지 로직 (한글 설명 컬럼 오인 차단)
-    year_col = None
-    # 1단계: 정확히 일치하는 핵심 키워드 찾기
+    # [수정] '일자', '연도', '날짜' 등 가장 첫 번째 열을 기준(필터)으로 고정
+    # 스프레드시트의 A열이 '일자'라고 가정하고 필터 기준으로 삼습니다.
+    date_col = df.columns[0] 
     for col in df.columns:
-        if col.strip() in ["연도", "년도", "구분", "개정연도", "개정년도"]:
-            year_col = col
+        if any(keyword in col for keyword in ["일자", "연도", "년도", "날짜"]):
+            date_col = col
             break
-    # 2단계: 없을 경우 '내용'이나 '사유'를 제외한 연도 포함 컬럼 찾기
-    if not year_col:
-        for col in df.columns:
-            if ("연도" in col or "년도" in col or "구분" in col) and "내용" not in col and "사유" not in col:
-                year_col = col
-                break
-    # 3단계: 최종 최후의 보루 (202로 시작하는 데이터가 있는 컬럼 선택)
-    if not year_col:
-        for col in df.columns:
-            if df[col].astype(str).str.contains("202").any():
-                year_col = col
-                break
-    if not year_col:
-        year_col = df.columns[0]
 
-    # 데이터 정렬 및 순수 연도 목록 생성
-    df[year_col] = df[year_col].astype(str).str.strip()
-    unique_years = sorted([y for y in df[year_col].unique() if y], reverse=True)
+    # 필터용 날짜/일자 목록 생성 (빈 값 제외)
+    df[date_col] = df[date_col].astype(str).str.strip()
+    unique_dates = sorted([d for d in df[date_col].unique() if d], reverse=True)
 
-    # 수정 사항: 상단 개정연도 선택창에 순수 연도 데이터만 바인딩
-    selected_year = st.selectbox(f"📅 조회할 개정연도 선택 ({tab_name})", ["전체 보기"] + unique_years, key=f"select_{tab_name}")
+    # 드롭다운 필터
+    selected_date = st.selectbox(
+        f"📅 조회할 {date_col} 선택 ({tab_name})", 
+        ["전체 보기"] + unique_dates, 
+        key=f"select_{tab_name}"
+    )
     
     filtered_df = df.copy()
-    if selected_year != "전체 보기":
-        filtered_df = filtered_df[filtered_df[year_col] == selected_year]
+    if selected_date != "전체 보기":
+        filtered_df = filtered_df[filtered_df[date_col] == selected_date]
 
-    # 수정 사항: 내용이 잘리지 않도록 st.dataframe 대신 st.table 사용
-    st.markdown("##### 📊 개정 이력 목록 (내용 자동 줄바꿈)")
+    # [수정] 스프레드시트 모양 그대로 출력
+    st.markdown(f"##### 📊 개정 이력 목록 (원본 형태)")
     if not filtered_df.empty:
+        # st.table을 사용하여 원본 컬럼 순서대로 가로형 표 출력
         st.table(filtered_df)
     else:
-        st.write("선택한 연도의 데이터가 없습니다.")
+        st.write("선택한 조건의 데이터가 없습니다.")
     
     st.divider()
     
     # 하단부 클릭 시 상세 내역 및 PDF 연동 뷰어
     if not filtered_df.empty:
-        st.subheader("🔍 선택 이력 상세 정보 및 전문 확인")
+        st.subheader("🔍 이력 원문 대조 확인")
         
         row_options = []
         for idx, row in filtered_df.iterrows():
-            hint = f"[{row[year_col]}] "
-            for c in filtered_df.columns:
-                if c != year_col and row[c]:
-                    hint += f"{str(row[c])[:30]}..."
-                    break
+            hint = f"[{row[date_col]}] "
+            # '개정내용'이나 2번째 컬럼의 텍스트를 일부 보여줌
+            second_col = df.columns[1] if len(df.columns) > 1 else date_col
+            hint += f"{str(row[second_col])[:30]}..."
             row_options.append((idx, hint))
             
         selected_idx = st.selectbox(
@@ -139,27 +132,29 @@ def render_tab_content(df, tab_name):
         col_left, col_right = st.columns(2)
         
         with col_left:
-            st.markdown("### 📝 개정 요약 상세")
+            st.markdown("### 📝 항목별 상세 내용")
+            # 시트의 모든 열(일자, 내용, 사유 등)을 순서대로 출력
             for col in filtered_df.columns:
                 st.markdown(f"**• {col}**")
                 st.write(str(chosen_row[col]))
         
         with col_right:
-            target_year_str = str(chosen_row[year_col])
+            # 일자(예: 2024.07.01)에서 연도 4자리만 추출하여 PDF 파일 매칭
+            target_date_str = str(chosen_row[date_col])
             matched_year_key = None
             for y_key in FILE_MAP.keys():
-                if y_key[:4] in target_year_str:
+                if y_key in target_date_str:
                     matched_year_key = y_key
                     break
             
             if matched_year_key:
-                st.markdown(f"### 📄 {matched_year_key} 공급규정 전문")
+                st.markdown(f"### 📄 {matched_year_key}년 공급규정 전문")
                 with st.expander(f"🔍 {FILE_MAP[matched_year_key]} 원문 텍스트 펼치기", expanded=True):
                     with st.spinner("PDF 문서 읽어오는 중..."):
                         pdf_text = extract_text_from_pdf(FILE_MAP[matched_year_key])
                         st.text_area(label="전체 파일 본문", value=pdf_text, height=450, key=f"pdf_area_{tab_name}_{selected_idx}")
             else:
-                st.warning("⚠️ 선택한 내역의 연도와 일치하는 PDF 원문 파일을 찾을 수 없습니다.")
+                st.warning("⚠️ 선택한 일자의 연도와 일치하는 PDF 원문 파일을 찾을 수 없습니다.")
 
 with tab1:
     render_tab_content(df_simple, "Simple")
