@@ -42,7 +42,7 @@ def extract_text_from_pdf(file_name):
         return f"❌ PDF 읽기 오류: {e}"
     return text
 
-# --- 구글 시트 데이터 로드 및 전처리 함수 (방탄 버전) ---
+# --- 구글 시트 데이터 로드 및 전처리 함수 ---
 @st.cache_data(ttl=300)
 def load_cleaned_data(sheet_name):
     try:
@@ -51,11 +51,11 @@ def load_cleaned_data(sheet_name):
         
         df = pd.read_csv(csv_url, dtype=str)
         
-        # 1. 완벽히 비어있는 행과 열만 우선 삭제 (안전한 정제)
+        # 1. 완벽히 비어있는 행과 열 삭제
         df = df.dropna(how='all', axis=0).dropna(how='all', axis=1)
         
         if not df.empty and len(df.columns) > 0:
-            # 2. 'Unnamed' 컬럼명 정리 (전체 삭제가 아닌 이름만 빈칸 처리)
+            # 2. 'Unnamed' 컬럼명 정리
             new_cols = []
             for c in df.columns:
                 if "Unnamed" in str(c):
@@ -64,10 +64,10 @@ def load_cleaned_data(sheet_name):
                     new_cols.append(str(c).strip())
             df.columns = new_cols
             
-            # 3. 눈에 보이지 않는 공백을 완벽히 인식하고 이전 일자로 채우기 (Forward Fill)
+            # 3. 셀 병합 빈칸을 이전 일자로 채우기
             df.iloc[:, 0] = df.iloc[:, 0].replace(r'^\s*$', np.nan, regex=True).ffill()
         
-        # 4. 남은 NaN을 빈 문자열로 변환
+        # 4. 남은 빈 셀 처리
         df = df.fillna("")
         return df
     except Exception as e:
@@ -86,7 +86,6 @@ def render_tab_content(df, tab_name):
         st.info("시트에 데이터가 없거나 로드되지 않았습니다.")
         return
 
-    # 첫 번째 열(일자)을 기준으로 고정
     date_col = df.columns[0] 
 
     # 드롭다운 필터용 일자 목록 생성
@@ -103,12 +102,14 @@ def render_tab_content(df, tab_name):
     if selected_date != "전체 보기":
         filtered_df = filtered_df[filtered_df[date_col] == selected_date]
 
+    # [핵심 수정] 필터링 후 내부 인덱스를 무조건 0, 1, 2...로 초기화하여 KeyError 원천 차단
+    filtered_df = filtered_df.reset_index(drop=True)
+
     st.markdown(f"##### 📊 개정 이력 목록")
     if not filtered_df.empty:
-        # 에러를 방지하기 위해 인덱스를 1부터 시작하는 숫자로 깔끔하게 초기화
-        display_df = filtered_df.copy().reset_index(drop=True)
+        # 화면 출력용 데이터프레임의 인덱스만 1부터 시작하는 숫자로 예쁘게 변경
+        display_df = filtered_df.copy()
         display_df.index = range(1, len(display_df) + 1)
-        
         st.table(display_df)
     else:
         st.write("선택한 조건의 데이터가 없습니다.")
@@ -122,7 +123,6 @@ def render_tab_content(df, tab_name):
         row_options = []
         for idx, row in filtered_df.iterrows():
             hint = f"[{row[date_col]}] "
-            # 두 번째 컬럼이 있으면 내용 일부를 힌트로 추가
             second_col = df.columns[1] if len(df.columns) > 1 else date_col
             hint += f"{str(row[second_col])[:30]}..."
             row_options.append((idx, hint))
@@ -136,7 +136,6 @@ def render_tab_content(df, tab_name):
         
         chosen_row = filtered_df.loc[selected_idx]
         
-        # 빈 이름의 컬럼은 건너뛰기 위해 유효한 컬럼만 필터링
         valid_cols = [c for c in df.columns if c != ""]
         num_valid_cols = len(valid_cols)
         
