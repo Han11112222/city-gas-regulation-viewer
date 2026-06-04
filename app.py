@@ -55,13 +55,24 @@ def load_cleaned_data(sheet_name):
         df = df.dropna(how='all', axis=0).dropna(how='all', axis=1)
         
         if not df.empty and len(df.columns) > 0:
-            # 2. 'Unnamed' 컬럼명 정리
+            # 2. [핵심 수정] 컬럼명 중복 방지 로직 (AttributeError 원천 차단)
             new_cols = []
-            for c in df.columns:
-                if "Unnamed" in str(c):
-                    new_cols.append("")
+            for i, c in enumerate(df.columns):
+                c_str = str(c).strip()
+                if "Unnamed" in c_str or c_str == "":
+                    # 빈 컬럼은 고유한 이름 부여
+                    new_name = f"공란_{i}"
                 else:
-                    new_cols.append(str(c).strip())
+                    new_name = c_str
+                
+                # 만약 이미 존재하는 컬럼명이라면 뒤에 숫자를 붙여 중복 방지
+                base_name = new_name
+                suffix = 1
+                while new_name in new_cols:
+                    new_name = f"{base_name}_{suffix}"
+                    suffix += 1
+                new_cols.append(new_name)
+                
             df.columns = new_cols
             
             # 3. 셀 병합 빈칸을 이전 일자로 채우기
@@ -86,10 +97,13 @@ def render_tab_content(df, tab_name):
         st.info("시트에 데이터가 없거나 로드되지 않았습니다.")
         return
 
+    # 첫 번째 열을 일자 컬럼으로 지정
     date_col = df.columns[0] 
 
-    # 드롭다운 필터용 일자 목록 생성
+    # 에러가 났던 부분: 이제 date_col이 무조건 고유하므로 DataFrame이 아닌 Series로 정상 인식됩니다.
     df[date_col] = df[date_col].astype(str).str.strip()
+    
+    # 드롭다운 필터용 일자 목록 생성
     unique_dates = sorted([d for d in df[date_col].unique() if d and d != "nan"], reverse=True)
 
     selected_date = st.selectbox(
@@ -102,14 +116,19 @@ def render_tab_content(df, tab_name):
     if selected_date != "전체 보기":
         filtered_df = filtered_df[filtered_df[date_col] == selected_date]
 
-    # [핵심 수정] 필터링 후 내부 인덱스를 무조건 0, 1, 2...로 초기화하여 KeyError 원천 차단
+    # 내부 인덱스 초기화로 KeyError 방지
     filtered_df = filtered_df.reset_index(drop=True)
 
     st.markdown(f"##### 📊 개정 이력 목록")
     if not filtered_df.empty:
-        # 화면 출력용 데이터프레임의 인덱스만 1부터 시작하는 숫자로 예쁘게 변경
+        # 화면 출력용 데이터프레임 (인덱스를 1부터 시작)
         display_df = filtered_df.copy()
         display_df.index = range(1, len(display_df) + 1)
+        
+        # '공란_'으로 시작하는 임시 열 이름은 표에 그릴 때만 안 보이게 빈칸으로 처리
+        display_cols = ["" if col.startswith("공란_") else col for col in display_df.columns]
+        display_df.columns = display_cols
+        
         st.table(display_df)
     else:
         st.write("선택한 조건의 데이터가 없습니다.")
@@ -136,18 +155,20 @@ def render_tab_content(df, tab_name):
         
         chosen_row = filtered_df.loc[selected_idx]
         
-        valid_cols = [c for c in df.columns if c != ""]
+        # '공란_' 열을 제외한 유효한 컬럼만 뷰어에 표시
+        valid_cols = [c for c in df.columns if not c.startswith("공란_")]
         num_valid_cols = len(valid_cols)
         
         if num_valid_cols > 0:
             cols = st.columns(num_valid_cols)
             for i, col_name in enumerate(valid_cols):
                 with cols[i]:
-                    st.markdown(f"**📍 {col_name if col_name else '항목'}**")
+                    st.markdown(f"**📍 {col_name}**")
                     st.info(str(chosen_row[col_name]))
         
         st.markdown("<br>", unsafe_allow_html=True)
         
+        # PDF 뷰어
         target_date_str = str(chosen_row[date_col])
         matched_year_key = None
         for y_key in FILE_MAP.keys():
