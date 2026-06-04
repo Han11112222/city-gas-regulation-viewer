@@ -43,7 +43,7 @@ def extract_text_from_pdf(file_name):
     return text
 
 # --- 구글 시트 데이터 로드 및 전처리 함수 ---
-@st.cache_data(ttl=0) # 수정 즉시 반영을 위해 캐시 0 유지 (완료 후 300으로 변경 권장)
+@st.cache_data(ttl=0) # 시트 수정 즉시 확인을 위해 캐시 0 설정
 def load_cleaned_data(sheet_name):
     try:
         encoded_sheet_name = urllib.parse.quote(sheet_name)
@@ -125,25 +125,20 @@ def render_tab_content(df, tab_name):
         display_df = display_df[valid_display_cols]
         display_df.index = range(1, len(display_df) + 1)
         
-        # --- [추가된 부분] 표 너비 100% 확장 및 특정 컬럼 너비 강제 할당 ---
-        css = """
-        <style>
-        /* 테이블이 화면 전체 너비를 쓰도록 강제 */
-        [data-testid="stTable"] table {
-            width: 100% !important;
-        }
-        """
-        # 컬럼 이름에 '내용'이나 '사유'가 포함되어 있으면 비율을 넉넉하게 할당
+        # --- 표 너비 100% 확장 및 특정 컬럼 너비 강제 할당 (안전한 CSS 적용) ---
+        css = "<style>\n"
+        css += '[data-testid="stTable"] table { width: 100% !important; }\n'
+        
         for i, col in enumerate(display_df.columns):
+            # 1열은 인덱스 번호이므로, 실제 데이터는 i+2번째 열에 해당
             if "내용" in col:
-                # 1열은 번호(index)이므로 실제 데이터는 i+2번째
                 css += f'[data-testid="stTable"] th:nth-child({i+2}), [data-testid="stTable"] td:nth-child({i+2}) {{ width: 50% !important; }}\n'
             elif "사유" in col:
                 css += f'[data-testid="stTable"] th:nth-child({i+2}), [data-testid="stTable"] td:nth-child({i+2}) {{ width: 25% !important; }}\n'
 
         css += "</style>"
         st.markdown(css, unsafe_allow_html=True)
-        # ----------------------------------------------------------------------
+        # -----------------------------------------------------------------
         
         st.table(display_df)
     else:
