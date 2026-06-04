@@ -41,23 +41,30 @@ def extract_text_from_pdf(file_name):
         return f"❌ PDF 읽기 오류: {e}"
     return text
 
-# --- 구글 시트 데이터 로드 및 전처리 함수 ---
+# --- 구글 시트 데이터 로드 및 전처리 함수 (완전 개선판) ---
 @st.cache_data(ttl=300)
 def load_cleaned_data(sheet_name):
     try:
         encoded_sheet_name = urllib.parse.quote(sheet_name)
         csv_url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv&sheet={encoded_sheet_name}"
-        df = pd.read_csv(csv_url)
         
-        # Unnamed 유령 컬럼 완벽 제거
-        df = df.loc[:, ~df.columns.str.contains('^Unnamed', na=False)]
+        # 1. 데이터를 무조건 '문자열(String)'로 읽어서 2012.9 같은 날짜가 변형되지 않도록 원천 차단
+        df = pd.read_csv(csv_url, dtype=str)
         
-        # 모든 데이터가 비어있는 빈 행 삭제
-        df = df.dropna(how='all')
+        # 2. 내용이 아예 없는 텅 빈 행과 열만 안전하게 삭제 (데이터가 있는 열은 절대 건드리지 않음)
+        df = df.dropna(how='all', axis=0).dropna(how='all', axis=1)
         
-        # 빈 셀 처리 및 공백 정제
+        # 3. 파이썬이 임의로 붙인 'Unnamed' 헤더가 있다면 빈칸으로 깔끔하게 처리
+        new_cols = []
+        for col in df.columns:
+            if "Unnamed" in str(col):
+                new_cols.append("-")
+            else:
+                new_cols.append(str(col).strip())
+        df.columns = new_cols
+        
+        # 4. 빈 셀 처리 (nan을 빈 문자열로)
         df = df.fillna("")
-        df.columns = [str(col).strip() for col in df.columns]
         return df
     except Exception as e:
         st.error(f"'{sheet_name}' 데이터를 가져오는 중 에러가 발생했습니다.")
@@ -78,12 +85,14 @@ def render_tab_content(df, tab_name):
     # 첫 번째 열(일자)을 기준으로 고정
     date_col = df.columns[0] 
     for col in df.columns:
-        if any(keyword in col for keyword in ["일자", "연도", "년도", "날짜"]):
+        if any(keyword in str(col) for keyword in ["일자", "연도", "년도", "날짜"]):
             date_col = col
             break
 
     df[date_col] = df[date_col].astype(str).str.strip()
-    unique_dates = sorted([d for d in df[date_col].unique() if d], reverse=True)
+    
+    # 드롭다운에 들어갈 고유 일자 목록 생성 (빈 값은 제외)
+    unique_dates = sorted([d for d in df[date_col].unique() if d and d != "nan"], reverse=True)
 
     selected_date = st.selectbox(
         f"📅 조회할 {date_col} 선택 ({tab_name})", 
@@ -97,6 +106,7 @@ def render_tab_content(df, tab_name):
 
     st.markdown(f"##### 📊 개정 이력 목록")
     if not filtered_df.empty:
+        # 스프레드시트 형태 그대로 출력
         st.table(filtered_df)
     else:
         st.write("선택한 조건의 데이터가 없습니다.")
@@ -123,19 +133,18 @@ def render_tab_content(df, tab_name):
         
         chosen_row = filtered_df.loc[selected_idx]
         
-        # [핵심 수정] 4개의 항목을 4개의 열(Column)로 세로로 구분하여 나란히 배치
+        # 4개의 항목을 4개의 열(Column)로 세로로 구분하여 나란히 배치
         num_cols = len(df.columns)
         cols = st.columns(num_cols)
         
         for i, col_name in enumerate(df.columns):
             with cols[i]:
                 st.markdown(f"**📍 {col_name}**")
-                # 눈에 잘 띄도록 info 박스로 처리
                 st.info(str(chosen_row[col_name]))
         
-        st.markdown("<br>", unsafe_allow_html=True) # 공간 분리
+        st.markdown("<br>", unsafe_allow_html=True)
         
-        # PDF 뷰어는 공간을 넉넉하게 쓰도록 하단에 풀 사이즈로 배치
+        # PDF 뷰어 연동
         target_date_str = str(chosen_row[date_col])
         matched_year_key = None
         for y_key in FILE_MAP.keys():
@@ -150,7 +159,7 @@ def render_tab_content(df, tab_name):
                     pdf_text = extract_text_from_pdf(FILE_MAP[matched_year_key])
                     st.text_area(label="전체 파일 본문", value=pdf_text, height=450, key=f"pdf_area_{tab_name}_{selected_idx}")
         else:
-            st.warning("⚠️ 선택한 일자의 연도와 일치하는 PDF 원문 파일을 찾을 수 없습니다.")
+            st.warning(f"⚠️ 선택한 일자({target_date_str})에 매칭되는 PDF 파일을 찾을 수 없습니다.")
 
 with tab1:
     render_tab_content(df_simple, "Simple")
