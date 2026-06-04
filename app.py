@@ -3,6 +3,7 @@ import pandas as pd
 import pdfplumber
 import os
 import urllib.parse
+import numpy as np
 
 # --- 페이지 기본 설정 ---
 st.set_page_config(page_title="도시가스 공급규정 개정 이력 관리 시스템", layout="wide")
@@ -41,33 +42,36 @@ def extract_text_from_pdf(file_name):
         return f"❌ PDF 읽기 오류: {e}"
     return text
 
-# --- 구글 시트 데이터 로드 및 전처리 함수 (최종 수정판) ---
+# --- 구글 시트 데이터 로드 및 전처리 함수 (방탄 버전) ---
 @st.cache_data(ttl=300)
 def load_cleaned_data(sheet_name):
     try:
         encoded_sheet_name = urllib.parse.quote(sheet_name)
-        # 데이터를 변형 없이 가져오는 가장 안정적인 다운로드 URL
         csv_url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&sheet={encoded_sheet_name}"
         
-        # 날짜가 변형되지 않도록 모두 문자열(String)로 읽기
         df = pd.read_csv(csv_url, dtype=str)
         
-        # 1. Unnamed 유령 컬럼 제거
-        df = df.loc[:, ~df.columns.str.contains('^Unnamed', na=False)]
-        
-        # 2. 내용이 모두 비어있는 텅 빈 행/열 삭제
+        # 1. 완벽히 비어있는 행과 열만 우선 삭제 (안전한 정제)
         df = df.dropna(how='all', axis=0).dropna(how='all', axis=1)
         
-        # 3. [핵심] 스프레드시트의 '셀 병합' 빈칸 채우기
-        # 일자(첫 번째 컬럼)가 병합되어 아래쪽이 비어있다면, 위에 적힌 일자를 그대로 복사해서 채워 넣습니다 (Forward Fill)
-        if not df.empty:
-            df.iloc[:, 0] = df.iloc[:, 0].ffill()
+        if not df.empty and len(df.columns) > 0:
+            # 2. 'Unnamed' 컬럼명 정리 (전체 삭제가 아닌 이름만 빈칸 처리)
+            new_cols = []
+            for c in df.columns:
+                if "Unnamed" in str(c):
+                    new_cols.append("")
+                else:
+                    new_cols.append(str(c).strip())
+            df.columns = new_cols
+            
+            # 3. 눈에 보이지 않는 공백을 완벽히 인식하고 이전 일자로 채우기 (Forward Fill)
+            df.iloc[:, 0] = df.iloc[:, 0].replace(r'^\s*$', np.nan, regex=True).ffill()
         
-        # 4. 남은 빈 셀 처리
+        # 4. 남은 NaN을 빈 문자열로 변환
         df = df.fillna("")
         return df
     except Exception as e:
-        st.error(f"'{sheet_name}' 데이터를 가져오는 중 에러가 발생했습니다.")
+        st.error(f"'{sheet_name}' 데이터를 가져오는 중 에러가 발생했습니다: {e}")
         return pd.DataFrame()
 
 # --- 데이터 가져오기 ---
@@ -90,7 +94,7 @@ def render_tab_content(df, tab_name):
     unique_dates = sorted([d for d in df[date_col].unique() if d and d != "nan"], reverse=True)
 
     selected_date = st.selectbox(
-        f"📅 조회할 {date_col} 선택 ({tab_name})", 
+        f"📅 조회할 일자 선택 ({tab_name})", 
         ["전체 보기"] + unique_dates, 
         key=f"select_{tab_name}"
     )
@@ -101,9 +105,9 @@ def render_tab_content(df, tab_name):
 
     st.markdown(f"##### 📊 개정 이력 목록")
     if not filtered_df.empty:
-        # [핵심] 보기 싫은 좌측 숫자 번호표(0, 1, 2...)를 투명하게 지워버립니다.
-        display_df = filtered_df.copy()
-        display_df.index = [""] * len(display_df)
+        # 에러를 방지하기 위해 인덱스를 1부터 시작하는 숫자로 깔끔하게 초기화
+        display_df = filtered_df.copy().reset_index(drop=True)
+        display_df.index = range(1, len(display_df) + 1)
         
         st.table(display_df)
     else:
@@ -111,13 +115,14 @@ def render_tab_content(df, tab_name):
     
     st.divider()
     
-    # --- 하단부: 항목 상세내용 (다중 열 분할) + PDF 뷰어 ---
+    # --- 하단부: 항목 상세내용 + PDF 뷰어 ---
     if not filtered_df.empty:
         st.subheader("🔍 항목별 상세 내용 및 원문 대조")
         
         row_options = []
         for idx, row in filtered_df.iterrows():
             hint = f"[{row[date_col]}] "
+            # 두 번째 컬럼이 있으면 내용 일부를 힌트로 추가
             second_col = df.columns[1] if len(df.columns) > 1 else date_col
             hint += f"{str(row[second_col])[:30]}..."
             row_options.append((idx, hint))
@@ -131,18 +136,19 @@ def render_tab_content(df, tab_name):
         
         chosen_row = filtered_df.loc[selected_idx]
         
-        # 항목 개수만큼 세로로 열을 나누어 나란히 배치
-        num_cols = len(df.columns)
-        cols = st.columns(num_cols)
+        # 빈 이름의 컬럼은 건너뛰기 위해 유효한 컬럼만 필터링
+        valid_cols = [c for c in df.columns if c != ""]
+        num_valid_cols = len(valid_cols)
         
-        for i, col_name in enumerate(df.columns):
-            with cols[i]:
-                st.markdown(f"**📍 {col_name}**")
-                st.info(str(chosen_row[col_name]))
+        if num_valid_cols > 0:
+            cols = st.columns(num_valid_cols)
+            for i, col_name in enumerate(valid_cols):
+                with cols[i]:
+                    st.markdown(f"**📍 {col_name if col_name else '항목'}**")
+                    st.info(str(chosen_row[col_name]))
         
         st.markdown("<br>", unsafe_allow_html=True)
         
-        # PDF 뷰어 연동
         target_date_str = str(chosen_row[date_col])
         matched_year_key = None
         for y_key in FILE_MAP.keys():
