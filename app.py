@@ -42,30 +42,26 @@ def extract_text_from_pdf(file_name):
         return f"❌ PDF 읽기 오류: {e}"
     return text
 
-# --- 구글 시트 데이터 로드 및 전처리 함수 (스마트 헤더 탐색 적용) ---
-@st.cache_data(ttl=300)
+# --- 구글 시트 데이터 로드 및 전처리 함수 ---
+@st.cache_data(ttl=0) # 수정 즉시 반영을 위해 캐시 0 유지 (완료 후 300으로 변경 권장)
 def load_cleaned_data(sheet_name):
     try:
         encoded_sheet_name = urllib.parse.quote(sheet_name)
         csv_url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&sheet={encoded_sheet_name}"
         
-        # 이름표(header)를 무시하고 엑셀 원본 그대로 가져오기
         df_raw = pd.read_csv(csv_url, dtype=str, header=None)
         df_raw = df_raw.dropna(how='all', axis=0).dropna(how='all', axis=1)
         
         if df_raw.empty:
             return pd.DataFrame()
             
-        # 1. 진짜 이름표(헤더)가 있는 행 찾기
         header_idx = 0
         for i in range(min(10, len(df_raw))):
             row_vals = df_raw.iloc[i].fillna("").astype(str).tolist()
-            # '일자', '연도', '내용', '사유' 중 하나라도 포함된 줄을 진짜 헤더로 간주
             if any(keyword in val for val in row_vals for keyword in ["일자", "연도", "내용", "사유"]):
                 header_idx = i
                 break
                 
-        # 2. 찾은 행을 진짜 이름표로 설정하고 중복 방지 처리
         headers = df_raw.iloc[header_idx].fillna("").astype(str)
         new_cols = []
         for j, c in enumerate(headers):
@@ -80,11 +76,9 @@ def load_cleaned_data(sheet_name):
                 suffix += 1
             new_cols.append(c_str)
             
-        # 3. 진짜 헤더 그 다음 줄부터를 알맹이 데이터로 저장
         df = df_raw.iloc[header_idx + 1:].copy()
         df.columns = new_cols
         
-        # 4. 일자(첫 번째 열) 셀 병합된 빈칸 채우기
         if not df.empty:
             df.iloc[:, 0] = df.iloc[:, 0].replace(r'^\s*$', np.nan, regex=True).ffill()
         
@@ -106,12 +100,9 @@ def render_tab_content(df, tab_name):
         st.info("시트에 데이터가 없거나 로드되지 않았습니다.")
         return
 
-    # 첫 번째 열을 일자 컬럼으로 지정
     date_col = df.columns[0] 
-
     df[date_col] = df[date_col].astype(str).str.strip()
     
-    # 드롭다운 필터용 일자 목록 생성
     unique_dates = sorted([d for d in df[date_col].unique() if d and d != "nan" and not d.startswith("공란_")], reverse=True)
 
     selected_date = st.selectbox(
@@ -130,11 +121,30 @@ def render_tab_content(df, tab_name):
     if not filtered_df.empty:
         display_df = filtered_df.copy()
         
-        # 쓸모없는 '공란_' 열은 표에서 완벽히 제외
         valid_display_cols = [col for col in display_df.columns if not col.startswith("공란_")]
         display_df = display_df[valid_display_cols]
-        
         display_df.index = range(1, len(display_df) + 1)
+        
+        # --- [추가된 부분] 표 너비 100% 확장 및 특정 컬럼 너비 강제 할당 ---
+        css = """
+        <style>
+        /* 테이블이 화면 전체 너비를 쓰도록 강제 */
+        [data-testid="stTable"] table {
+            width: 100% !important;
+        }
+        """
+        # 컬럼 이름에 '내용'이나 '사유'가 포함되어 있으면 비율을 넉넉하게 할당
+        for i, col in enumerate(display_df.columns):
+            if "내용" in col:
+                # 1열은 번호(index)이므로 실제 데이터는 i+2번째
+                css += f'[data-testid="stTable"] th:nth-child({i+2}), [data-testid="stTable"] td:nth-child({i+2}) {{ width: 50% !important; }}\n'
+            elif "사유" in col:
+                css += f'[data-testid="stTable"] th:nth-child({i+2}), [data-testid="stTable"] td:nth-child({i+2}) {{ width: 25% !important; }}\n'
+
+        css += "</style>"
+        st.markdown(css, unsafe_allow_html=True)
+        # ----------------------------------------------------------------------
+        
         st.table(display_df)
     else:
         st.write("선택한 조건의 데이터가 없습니다.")
@@ -174,7 +184,6 @@ def render_tab_content(df, tab_name):
         
         st.markdown("<br>", unsafe_allow_html=True)
         
-        # PDF 뷰어
         target_date_str = str(chosen_row[date_col])
         matched_year_key = None
         for y_key in FILE_MAP.keys():
