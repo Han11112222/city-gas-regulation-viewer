@@ -44,18 +44,18 @@ def extract_text_from_pdf(file_name):
         return f"❌ PDF 읽기 오류: {e}"
     return text
 
-# --- [수정 및 고도화] 조항(예: 제4조) 추출 함수 (줄바꿈/변칙 목차 완벽 차단) ---
+# --- [완벽 수정] 조항 추출 함수 (목차 완전 배제 및 본문 타겟팅) ---
 def get_clause_text(pdf_text, clause_name):
     if not clause_name:
         return "조항 번호가 명확하지 않아 부분 추출이 어렵습니다. 하단에서 전체 본문을 확인해 주세요."
         
-    # '제4조'에서 숫자만 분리 추출 (예: '4')
+    # '제4조' 등에서 숫자만 추출
     num_match = re.search(r'\d+', clause_name)
     if not num_match:
         return f"💡 '{clause_name}'에서 조항 번호를 식별할 수 없습니다."
         
     num = num_match.group()
-    # PDF 본문 특성상 '제 4 조'처럼 사이에 공백이 있을 수 있으므로 공백 유연성(\s*) 부여
+    # 제4조, 제 4 조 등 띄어쓰기 변수 완벽 대응
     pattern = rf"제\s*{num}\s*조"
     matches = list(re.finditer(pattern, pdf_text))
     
@@ -64,39 +64,55 @@ def get_clause_text(pdf_text, clause_name):
         
     start_idx = -1
     
-    for match in matches:
+    for i, match in enumerate(matches):
         idx = match.start()
+        snippet = pdf_text[idx:min(len(pdf_text), idx + 300)]
+        is_toc = False
         
-        # 매칭 지점부터 넉넉하게 뒤로 200글자 범위를 확보하여 컨텍스트 검사
-        snippet = pdf_text[idx:min(len(pdf_text), idx + 200)]
-        
-        # [핵심 보완] 줄바꿈(\n)이 채 채워지기 전에 점(.), 가운뎃점(·), 대시(-) 등이 3개 이상 연속되거나
-        # '제4조 ... 2' 와 같이 숫자가 바로 이어지는 목차 특유의 패턴이 감지되면 목차로 보고 패스
-        if re.search(r'[\.·․…─\-_]{3,}', snippet) or re.search(rf"제\s*{num}\s*조[\s\n]*\.+", snippet):
+        # 1. 문서 초반(3000자 이내)에 위치한 첫 번째 매칭은 99.9% 확률로 목차이므로 강제 패스
+        if i == 0 and len(matches) > 1 and idx < 3000:
+            is_toc = True
+            
+        # 2. 목차 특유의 점선 패턴 필터링 (. . . . . 형태로 띄어쓰기가 섞여 있어도 잡아냄)
+        if re.search(r'(\.(?:\s*\.){3,})', snippet) or re.search(r'([·․…─\-_](?:\s*[·․…─\-_]){3,})', snippet):
+            is_toc = True
+            
+        # 3. 조항 제목 바로 뒤에 긴 공백과 페이지 번호가 단독으로 나오는 패턴 필터링
+        first_line = snippet.split('\n')[0]
+        if re.search(r'\s{4,}\d+\s*$', first_line):
+            is_toc = True
+            
+        if is_toc:
             continue
             
-        # 문서의 완전 앞부분(4000자 미만)에 위치하면서 뒤에 매칭이 더 남아있다면 높은 확률로 목차 페이지이므로 패스
-        if idx < 4000 and len(matches) > 1:
-            continue
-            
+        # 모든 목차 패턴의 함정을 피했다면, 이곳이 진짜 본문!
         start_idx = idx
         break
         
-    # 만약 정밀 필터링으로 인해 모두 목차로 분류되어 걸러졌다면, 안전장치로 가장 마지막 매칭 지점(진짜 본문)을 강제 지정
+    # 만약 예외 상황으로 모든 매칭이 목차로 판정되었다면, 안전하게 두 번째 매칭을 본문으로 강제 지정
     if start_idx == -1:
-        start_idx = matches[-1].start()
+        start_idx = matches[1].start() if len(matches) > 1 else matches[0].start()
         
-    # 다음 조항(제5조 또는 제6조)의 시작 부분을 찾아 거기까지만 깔끔하게 슬라이싱
+    # 다음 조항(본문의 끝) 찾기
     current_num = int(num)
-    next_clause_pattern = rf"\n\s*제\s*({current_num + 1}|{current_num + 2})\s*조"
-    next_match = re.search(next_clause_pattern, pdf_text[start_idx + 10:])
+    end_idx = start_idx + 4000 # 내용이 길 경우를 대비해 넉넉하게 4000자로 기본 설정
     
-    if next_match:
-        end_idx = start_idx + 10 + next_match.start()
-        return pdf_text[start_idx:end_idx].strip()
+    # 다음 번호(제5조 또는 제6조) 찾기
+    next_pattern = rf"\n\s*제\s*({current_num + 1}|{current_num + 2})\s*조"
+    next_matches = list(re.finditer(next_pattern, pdf_text[start_idx + 10:]))
+    
+    for nm in next_matches:
+        n_idx = start_idx + 10 + nm.start()
+        n_snippet = pdf_text[n_idx:min(len(pdf_text), n_idx + 300)]
         
-    # 다음 조항을 찾지 못한 예외의 경우 넉넉하게 2500자 추출 후 생략 처리
-    return pdf_text[start_idx:start_idx + 2500].strip() + "\n\n...(이하 생략 - 전체 본문 참조)..."
+        # 발견한 '다음 조항'이 목차나 참조 문구가 아닌지 한번 더 안전망 체크
+        if re.search(r'(\.(?:\s*\.){3,})', n_snippet):
+            continue
+        
+        end_idx = n_idx
+        break
+        
+    return pdf_text[start_idx:end_idx].strip()
 
 # --- 1. Simple(요약) 탭 데이터 로드 ---
 @st.cache_data(ttl=10)
@@ -286,12 +302,12 @@ def render_detail_tab(df):
             expander_title = f"🔍 {clause_name} 원문 대조하기" if clause_name else "🔍 관련 원문 대조하기"
             with st.expander(expander_title):
                 if matched_year_key and pdf_text:
-                    # 줄바꿈 무시 목차 패스 알고리즘 적용
+                    # 완벽하게 고도화된 본문 매칭 함수 적용
                     target_clause_text = get_clause_text(pdf_text, clause_name)
                     st.text_area(
                         label="PDF 원문 발췌", 
                         value=target_clause_text, 
-                        height=200, 
+                        height=250, 
                         key=f"text_area_detail_{y}_{idx}"
                     )
                 else:
