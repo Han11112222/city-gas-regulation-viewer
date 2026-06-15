@@ -5,7 +5,7 @@ import os
 import urllib.parse
 import numpy as np
 import time
-import re  # [신규] 조항 번호(제X조) 추출을 위해 추가
+import re
 
 # --- 페이지 기본 설정 ---
 st.set_page_config(page_title="도시가스 공급규정 개정 이력 관리 시스템", layout="wide")
@@ -44,24 +44,19 @@ def extract_text_from_pdf(file_name):
         return f"❌ PDF 읽기 오류: {e}"
     return text
 
-# --- [신규] PDF 텍스트에서 특정 조항(예: 제4조)만 추출하는 함수 ---
+# --- 조항(예: 제4조) 추출 함수 ---
 def get_clause_text(pdf_text, clause_name):
     if not clause_name:
-        return "조항 정보가 식별되지 않아 전체 본문을 하단에서 확인하세요."
+        return "조항 번호가 명확하지 않아 부분 추출이 어렵습니다. 하단에서 전체 본문을 확인해 주세요."
         
-    # '제4조' 형태에서 숫자만 추출하거나 정확한 패턴 검색
-    # 예: 제4조(용어의 정의) 또는 제4조 준하는 텍스트 매칭
     pattern = rf"({clause_name}\s*\(.*?\)|{clause_name})"
     matches = list(re.finditer(pattern, pdf_text))
     
     if not matches:
-        return f"💡 PDF 전문에서 '{clause_name}' 텍스트 영역을 직접 매칭하지 못했습니다. 아래의 전체 본문에서 직접 찾으실 수 있습니다."
+        return f"💡 PDF 전문에서 '{clause_name}' 텍스트 영역을 직접 매칭하지 못했습니다."
         
-    # 첫 번째 매칭된 지점부터 텍스트 추출 시작
     start_idx = matches[0].start()
     
-    # 다음 조항(예: 제5조, 제15조 등 숫자가 커지는 다음 제N조) 위치 탐색을 위한 패턴
-    # 현재 조항 번호에서 숫자 추출
     num_match = re.search(r'\d+', clause_name)
     if num_match:
         current_num = int(num_match.group())
@@ -72,8 +67,7 @@ def get_clause_text(pdf_text, clause_name):
             end_idx = start_idx + 10 + next_match.start()
             return pdf_text[start_idx:end_idx].strip()
             
-    # 다음 조항을 못 찾으면 해당 위치부터 약 1500자(안전하게 해당 조 내용이 다 들어갈 분량) 출력
-    return pdf_text[start_idx:start_idx + 1500].strip() + "\n\n...(이하 생략 - 하단 전체 전문을 참조하세요)..."
+    return pdf_text[start_idx:start_idx + 1500].strip() + "\n\n...(이하 생략)..."
 
 # --- 1. Simple(요약) 탭 데이터 로드 함수 ---
 @st.cache_data(ttl=10)
@@ -117,7 +111,7 @@ def load_simple_data(sheet_name):
         st.error(f"'{sheet_name}' 에러: {e}")
         return pd.DataFrame()
 
-# --- 2. 상세(신구조문) 탭 전용 데이터 로드 함수 ---
+# --- 2. 상세(신구조문) 탭 데이터 로드 ---
 @st.cache_data(ttl=10)
 def load_detail_data_by_gid(gid):
     try:
@@ -168,7 +162,7 @@ df_detail = load_detail_data_by_gid("1205780686")
 # --- 화면 탭 구성 ---
 tab1, tab2 = st.tabs(["📑 요약 버전 (Simple)", "📄 상세 버전 (신구조문 대비표)"])
 
-# --- 1. 요약 버전 (Simple) 탭 렌더링 함수 (기존 로직 완전 유지) ---
+# --- 1. 요약 버전 (Simple) 탭 렌더링 ---
 def render_simple_tab(df, tab_name="Simple"):
     if df.empty:
         st.info("시트에 데이터가 없거나 로드되지 않았습니다.")
@@ -267,10 +261,8 @@ def render_simple_tab(df, tab_name="Simple"):
                 with st.spinner("PDF 문서 읽어오는 중..."):
                     pdf_text = extract_text_from_pdf(FILE_MAP[matched_year_key])
                     st.text_area(label="전체 파일 본문", value=pdf_text, height=450, key=f"pdf_area_{tab_name}_{selected_idx}")
-        else:
-            st.warning(f"⚠️ 선택한 일자({target_date_str})에 매칭되는 PDF 파일을 찾을 수 없습니다.")
 
-# --- 2. [수정 및 고도화] 상세 버전 (신구조문 대비표) 탭 렌더링 함수 ---
+# --- 2. [수정] 상세 버전 탭 렌더링 (각 항목 바로 아래 원문 펼치기) ---
 def render_detail_tab(df):
     if df.empty:
         st.info("상세 탭 데이터가 없습니다.")
@@ -285,32 +277,15 @@ def render_detail_tab(df):
         st.markdown(f"### ⚖️ {y}년 신구조문 대비표")
         y_df = df[df['연도'] == y].reset_index(drop=True)
         
-        # [수정] 조문별 클릭(라디오 선택)을 위한 선택 데이터 구성
-        row_options = []
-        for idx, row in y_df.iterrows():
-            # 텍스트에서 '제X조' 추출 시도
-            clause_match = re.search(r'(제\s*\d+\s*조)', row['현행'] + row['개정(안)'])
-            clause_name = clause_match.group(1).replace(" ", "") if clause_match else f"항목 {idx+1}"
-            row_options.append((idx, clause_name))
-            
-        # 형님이 직관적으로 조항을 클릭하여 원문을 대조할 수 있도록 라디오 컨트롤 배치
-        selected_idx = st.radio(
-            f"🔍 전문 조회를 원하시는 조항을 클릭하세요 ({y}년):",
-            options=[opt[0] for opt in row_options],
-            format_func=lambda x: next(opt[1] for opt in row_options if opt[0] == x),
-            key=f"radio_detail_{y}",
-            horizontal=True
-        )
+        # 선택된 연도의 PDF 텍스트를 한 번만 미리 읽어옴 (속도 최적화)
+        matched_year_key = next((k for k in FILE_MAP.keys() if k in y), None)
+        pdf_text = ""
+        if matched_year_key:
+            pdf_text = extract_text_from_pdf(FILE_MAP[matched_year_key])
         
-        # 3단 구조문 배치 출력
         for idx, row in y_df.iterrows():
-            # 사용자가 상단 라디오에서 선택한 조항은 하이라이트(또는 테두리) 효과를 간접적으로 주기 위해 배경 색상을 다르게 적용
-            is_selected = (idx == selected_idx)
-            
+            # 1. 기존의 깔끔한 3단 구조문 출력
             with st.container():
-                if is_selected:
-                    st.markdown("<div style='background-color: #f0f4f8; padding: 10px; border-radius: 5px; border-left: 5px solid #2b5c8f;'>", unsafe_allow_html=True)
-                
                 col1, col2, col3 = st.columns([4, 4, 3])
                 with col1:
                     st.markdown("##### ⬅️ 현행")
@@ -321,34 +296,26 @@ def render_detail_tab(df):
                 with col3:
                     st.markdown("##### 📝 개정 사유")
                     st.warning(row['개정 사유'] if row['개정 사유'] else "(내용 없음)")
-                    
-                if is_selected:
-                    st.markdown("</div>", unsafe_allow_html=True)
+            
+            # 2. 텍스트에서 '제X조' 추출
+            clause_match = re.search(r'(제\s*\d+\s*조)', str(row['현행']) + str(row['개정(안)']))
+            clause_name = clause_match.group(1).replace(" ", "") if clause_match else ""
+            
+            # 3. 항목 바로 아래에 조항별 원문 대조 Expander (클릭 시 펼쳐짐) 부착
+            expander_title = f"🔍 {clause_name} 원문 대조하기" if clause_name else "🔍 관련 원문 대조하기"
+            with st.expander(expander_title):
+                if matched_year_key and pdf_text:
+                    target_clause_text = get_clause_text(pdf_text, clause_name)
+                    st.text_area(
+                        label="PDF 원문 발췌", 
+                        value=target_clause_text, 
+                        height=200, 
+                        key=f"text_area_detail_{y}_{idx}"
+                    )
+                else:
+                    st.warning("해당 연도의 PDF 문서가 연결되지 않았습니다.")
+            
             st.markdown("<hr style='margin: 10px 0;'>", unsafe_allow_html=True)
-            
-        st.markdown("<br>", unsafe_allow_html=True)
-        
-        # [핵심 신규 기능] 선택된 항목의 '제X조' 명칭을 기반으로 PDF에서 해당 전문만 파싱하여 즉시 바인딩
-        chosen_row = y_df.loc[selected_idx]
-        chosen_clause_name = next(opt[1] for opt in row_options if opt[0] == selected_idx)
-        
-        matched_year_key = next((k for k in FILE_MAP.keys() if k in y), None)
-        if matched_year_key:
-            st.markdown(f"### 📑 [전문 매칭] {y}년 공급규정 {chosen_clause_name} 전문")
-            pdf_text = extract_text_from_pdf(FILE_MAP[matched_year_key])
-            
-            # 조항별 매칭 텍스트 추출
-            target_clause_text = get_clause_text(pdf_text, chosen_clause_name)
-            
-            st.text_area(
-                label=f"선택한 {chosen_clause_name}의 PDF 원문 구역", 
-                value=target_clause_text, 
-                height=250, 
-                key=f"clause_area_{y}_{selected_idx}"
-            )
-            
-            with st.expander(f"📁 {FILE_MAP[matched_year_key]} 전체 전문 텍스트 펼치기", expanded=False):
-                st.text_area(label=f"{y}년 전체 원문", value=pdf_text, height=300, key=f"pdf_area_detail_{y}")
 
 # --- 탭 실행 ---
 with tab1:
