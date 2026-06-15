@@ -44,7 +44,7 @@ def extract_text_from_pdf(file_name):
         return f"❌ PDF 읽기 오류: {e}"
     return text
 
-# --- 조항(예: 제4조) 추출 함수 ---
+# --- [수정] 조항(예: 제4조) 추출 함수 (목차 회피 로직 추가) ---
 def get_clause_text(pdf_text, clause_name):
     if not clause_name:
         return "조항 번호가 명확하지 않아 부분 추출이 어렵습니다. 하단에서 전체 본문을 확인해 주세요."
@@ -55,11 +55,29 @@ def get_clause_text(pdf_text, clause_name):
     if not matches:
         return f"💡 PDF 전문에서 '{clause_name}' 텍스트 영역을 직접 매칭하지 못했습니다."
         
-    start_idx = matches[0].start()
+    start_idx = -1
     
+    # 여러 매칭 결과 중 목차를 건너뛰고 실제 본문을 찾습니다.
+    for match in matches:
+        # 매칭된 지점 바로 뒤의 텍스트(약 50자)를 확인
+        snippet = pdf_text[match.end():min(len(pdf_text), match.end() + 50)]
+        
+        # 목차의 특징: 점(.)이 3개 이상 연속되거나 말줄임표(…)가 있는 경우 패스
+        if re.search(r'\.{3,}', snippet) or "…" in snippet:
+            continue
+            
+        # 목차가 아니라고 판단되면 이곳을 본문의 시작점으로 확정
+        start_idx = match.start()
+        break
+        
+    # 만약 모두 목차 형태로 잡혔거나 예외가 발생하면 가장 마지막 매칭(보통 본문)을 선택
+    if start_idx == -1:
+        start_idx = matches[-1].start()
+        
     num_match = re.search(r'\d+', clause_name)
     if num_match:
         current_num = int(num_match.group())
+        # 다음 조항 찾기 (현재 조항의 1~2개 뒤 조항 번호 탐색)
         next_clause_pattern = rf"(제\s*{current_num + 1}\s*조|제\s*{current_num + 2}\s*조)"
         next_match = re.search(next_clause_pattern, pdf_text[start_idx + 10:])
         
@@ -67,6 +85,7 @@ def get_clause_text(pdf_text, clause_name):
             end_idx = start_idx + 10 + next_match.start()
             return pdf_text[start_idx:end_idx].strip()
             
+    # 다음 조항을 못 찾으면 넉넉하게 1500자 추출 후 생략 처리
     return pdf_text[start_idx:start_idx + 1500].strip() + "\n\n...(이하 생략)..."
 
 # --- 1. Simple(요약) 탭 데이터 로드 함수 ---
@@ -262,7 +281,7 @@ def render_simple_tab(df, tab_name="Simple"):
                     pdf_text = extract_text_from_pdf(FILE_MAP[matched_year_key])
                     st.text_area(label="전체 파일 본문", value=pdf_text, height=450, key=f"pdf_area_{tab_name}_{selected_idx}")
 
-# --- 2. [수정] 상세 버전 탭 렌더링 (각 항목 바로 아래 원문 펼치기) ---
+# --- 2. 상세 버전 탭 렌더링 ---
 def render_detail_tab(df):
     if df.empty:
         st.info("상세 탭 데이터가 없습니다.")
@@ -277,14 +296,12 @@ def render_detail_tab(df):
         st.markdown(f"### ⚖️ {y}년 신구조문 대비표")
         y_df = df[df['연도'] == y].reset_index(drop=True)
         
-        # 선택된 연도의 PDF 텍스트를 한 번만 미리 읽어옴 (속도 최적화)
         matched_year_key = next((k for k in FILE_MAP.keys() if k in y), None)
         pdf_text = ""
         if matched_year_key:
             pdf_text = extract_text_from_pdf(FILE_MAP[matched_year_key])
         
         for idx, row in y_df.iterrows():
-            # 1. 기존의 깔끔한 3단 구조문 출력
             with st.container():
                 col1, col2, col3 = st.columns([4, 4, 3])
                 with col1:
@@ -297,11 +314,9 @@ def render_detail_tab(df):
                     st.markdown("##### 📝 개정 사유")
                     st.warning(row['개정 사유'] if row['개정 사유'] else "(내용 없음)")
             
-            # 2. 텍스트에서 '제X조' 추출
             clause_match = re.search(r'(제\s*\d+\s*조)', str(row['현행']) + str(row['개정(안)']))
             clause_name = clause_match.group(1).replace(" ", "") if clause_match else ""
             
-            # 3. 항목 바로 아래에 조항별 원문 대조 Expander (클릭 시 펼쳐짐) 부착
             expander_title = f"🔍 {clause_name} 원문 대조하기" if clause_name else "🔍 관련 원문 대조하기"
             with st.expander(expander_title):
                 if matched_year_key and pdf_text:
