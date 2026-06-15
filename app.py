@@ -44,7 +44,7 @@ def extract_text_from_pdf(file_name):
         return f"❌ PDF 읽기 오류: {e}"
     return text
 
-# --- 조항 추출 함수 ---
+# --- 조항 추출 함수 (본문 추출 및 페이지 번호/빈 줄 압축) ---
 def get_clause_text(pdf_text, clause_name):
     if not clause_name:
         return "조항 번호가 명확하지 않아 부분 추출이 어렵습니다. 하단에서 전체 본문을 확인해 주세요."
@@ -110,7 +110,7 @@ def get_clause_text(pdf_text, clause_name):
     
     return extracted_text
 
-# --- PDF 원문에 하이라이트 적용 ---
+# --- PDF 원문용 하이라이트 함수 (상세 버전 탭에서 사용) ---
 def highlight_differences(pdf_text, current_text, revised_text):
     if not pdf_text: return pdf_text
 
@@ -136,7 +136,7 @@ def highlight_differences(pdf_text, current_text, revised_text):
             if len(p_clean) >= 2:
                 p_clean_no_space = re.sub(r'\s+', '', p_clean)
                 if p_clean_no_space not in c_clean_for_match:
-                    p_clean_no_space = re.sub(r'[\'\"“”‘’]', '', p_clean_no_space)
+                    p_clean_no_space = re.sub(r'[\'\"收藏“”‘’]', '', p_clean_no_space)
                     if len(p_clean_no_space) > 2:
                         targets.append((p_clean_no_space, tag))
         else:
@@ -151,7 +151,7 @@ def highlight_differences(pdf_text, current_text, revised_text):
         if len(p_clean) >= 2:
             p_clean_no_space = re.sub(r'\s+', '', p_clean)
             if p_clean_no_space not in c_clean_for_match:
-                p_clean_no_space = re.sub(r'[\'\"“”‘’]', '', p_clean_no_space)
+                p_clean_no_space = re.sub(r'[\'\"收藏“”‘’]', '', p_clean_no_space)
                 if len(p_clean_no_space) > 2:
                     targets.append((p_clean_no_space, ""))
 
@@ -199,6 +199,81 @@ def highlight_differences(pdf_text, current_text, revised_text):
         
         tag_html = f' <span style="color: #d32f2f; font-weight: bold;">{tag}</span>' if tag else ''
         highlighted_text = part1 + f'<span style="color: #d32f2f; font-weight: bold; background-color: #ffebee;">{part2}</span>{tag_html}' + part3
+
+    return highlighted_text
+
+# --- [신규] UI 텍스트간 실시간 비교용 하이라이트 함수 (2026년 list 탭에서 사용) ---
+def highlight_ui_differences(current_text, revised_text):
+    if not revised_text: return revised_text
+
+    curr_str = str(current_text)
+    rev_str = str(revised_text)
+
+    # 1. 개정안 문구에서 메모 검토 단어 및 줄바꿈 분리
+    split_pattern = r'생략|\(신설\)|\(변경\)|\(삭제\)|\n'
+    rev_parts = re.split(split_pattern, rev_str)
+
+    targets = []
+    c_clean_for_match = re.sub(r'\s+', '', curr_str)
+
+    for part in rev_parts:
+        p_clean = re.sub(r'[①-⑳\d]+\s*~\s*[①-⑳\d]+', '', part)
+        p_clean = re.sub(r'제\s*\d+\s*조\s*\([^)]*\)', '', p_clean)
+        p_clean = re.sub(r'^[)\],.\s]+', '', p_clean).strip()
+
+        if len(p_clean) < 2: continue
+
+        p_clean_no_space = re.sub(r'\s+', '', p_clean)
+        if p_clean_no_space in c_clean_for_match: continue
+
+        p_clean_no_space = re.sub(r'[\'\"“”‘’]', '', p_clean_no_space)
+        if len(p_clean_no_space) > 2:
+            targets.append(p_clean_no_space)
+
+    if not targets:
+        return rev_str
+
+    # 2. 개정안 후보 문구 압축 인덱스 맵 생성
+    stripped_rev = ""
+    mapping = []
+    for i, char in enumerate(rev_str):
+        if not char.isspace() and char not in ['\'', '"', '“', '”', '‘', '’']:
+            stripped_rev += char
+            mapping.append(i)
+
+    spans_to_highlight = []
+    for t in targets:
+        start_pos = 0
+        while True:
+            idx = stripped_rev.find(t, start_pos)
+            if idx == -1: break
+            orig_start = mapping[idx]
+            orig_end = mapping[idx + len(t) - 1]
+            spans_to_highlight.append((orig_start, orig_end))
+            start_pos = idx + len(t)
+
+    if not spans_to_highlight:
+        return rev_str
+
+    spans_to_highlight.sort(key=lambda x: x[0])
+    merged_spans = []
+    for s in spans_to_highlight:
+        if not merged_spans:
+            merged_spans.append(s)
+        else:
+            last = merged_spans[-1]
+            if s[0] <= last[1] + 1:
+                merged_spans[-1] = (last[0], max(last[1], s[1]))
+            else:
+                merged_spans.append(s)
+
+    # 3. 변경된 부분만 붉은색으로 치환
+    highlighted_text = rev_str
+    for start, end in reversed(merged_spans):
+        part1 = highlighted_text[:start]
+        part2 = highlighted_text[start:end+1]
+        part3 = highlighted_text[end+1:]
+        highlighted_text = part1 + f'<span style="color: #d32f2f; font-weight: bold; background-color: #ffebee;">{part2}</span>' + part3
 
     return highlighted_text
 
@@ -296,12 +371,11 @@ def load_detail_data_by_gid(gid):
         st.error(f"상세 데이터를 가져오는 중 에러가 발생했습니다: {e}")
         return pd.DataFrame()
 
-# --- [완벽 수정] 3. 2026년 list(pending issue) 탭 전용 데이터 로드 (GID 직접 지정) ---
+# --- 3. 2026년 list(pending issue) 탭 전용 데이터 로드 (GID 지정) ---
 @st.cache_data(ttl=10)
 def load_pending_data_by_gid(gid):
     try:
         cache_buster = int(time.time())
-        # 시트 이름 인식 오류를 피하기 위해 GID(1846159023)를 강제로 적용합니다.
         csv_url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={gid}&cb={cache_buster}"
         df_raw = pd.read_csv(csv_url, dtype=str, header=None)
         
@@ -313,7 +387,6 @@ def load_pending_data_by_gid(gid):
             vals = [str(x).strip() if str(x).strip() != 'nan' else '' for x in row.tolist()]
             if all(v == '' for v in vals): continue
             
-            # 헤더(현행, 개정안)를 찾는 로직
             if '현행' in vals and ('개정(안)' in vals or '개정 (안)' in vals):
                 curr_idx = vals.index('현행')
                 rev_idx = vals.index('개정(안)') if '개정(안)' in vals else vals.index('개정 (안)')
@@ -344,7 +417,6 @@ def load_pending_data_by_gid(gid):
 # --- 데이터 가져오기 ---
 df_simple = load_simple_data("simple")
 df_detail = load_detail_data_by_gid("1205780686")
-# 형님이 올려주신 이미지 주소창의 GID를 꽂아넣었습니다.
 df_pending = load_pending_data_by_gid("1846159023")  
 
 # --- 화면 탭 구성 ---
@@ -474,7 +546,7 @@ def render_detail_tab(df):
             
             st.markdown("<hr style='margin: 10px 0;'>", unsafe_allow_html=True)
 
-# --- 3. 2026년 list(pending issue) 탭 렌더링 ---
+# --- 3. [수정 및 고도화] 2026년 list(pending issue) 탭 렌더링 (실시간 붉은색 하이라이트 적용) ---
 def render_pending_tab(df):
     st.markdown("### 📝 2026년 개정 대기 항목 (Pending Issues)")
     st.caption("마케팅본부 팀에서 수합 중인 내년도 개정 검토안 목록입니다.")
@@ -486,15 +558,30 @@ def render_pending_tab(df):
     for idx, row in df.iterrows():
         with st.container():
             col1, col2, col3 = st.columns([4, 4, 3])
+            
             with col1:
                 st.markdown("##### ⬅️ 현행")
-                st.info(format_ui_text(row['현행']) if row['현행'] else "(내용 없음)")
+                # HTML 박스로 렌더링하여 깔끔한 단락 구분 유지
+                st.markdown(f"""
+                    <div style="background-color: #f0f6fc; border-left: 5px solid #1f6feb; padding: 12px; border-radius: 6px; white-space: pre-wrap; font-family: inherit; font-size: 14px; line-height: 1.6;">{row['현행'] if row['현행'] else '(내용 없음)'}</div>
+                """, unsafe_allow_html=True)
+                
             with col2:
                 st.markdown("##### ➡️ 개정(안) 후보")
-                st.success(format_ui_text(row['개정(안)']) if row['개정(안)'] else "(내용 없음)")
+                # [핵심] 현행 데이터와 실시간 비교하여 추가/변경된 부분만 붉은색으로 치환
+                highlighted_rev = highlight_ui_differences(row['현행'], row['개정(안)'])
+                
+                # HTML 뷰어로 교체하여 빨간색 하이라이트 효과 표출
+                st.markdown(f"""
+                    <div style="background-color: #dafbe1; border-left: 5px solid #2ea44f; padding: 12px; border-radius: 6px; white-space: pre-wrap; font-family: inherit; font-size: 14px; line-height: 1.6;">{highlighted_rev if highlighted_rev else '(내용 없음)'}</div>
+                """, unsafe_allow_html=True)
+                
             with col3:
                 st.markdown("##### 📝 검토 및 개정 사유")
-                st.warning(format_ui_text(row['개정 사유']) if row['개정 사유'] else "(내용 없음)")
+                st.markdown(f"""
+                    <div style="background-color: #fff8c5; border-left: 5px solid #9e6a03; padding: 12px; border-radius: 6px; white-space: pre-wrap; font-family: inherit; font-size: 14px; line-height: 1.6;">{row['개정 사유'] if row['개정 사유'] else '(내용 없음)'}</div>
+                """, unsafe_allow_html=True)
+                
         st.markdown("<hr style='margin: 10px 0;'>", unsafe_allow_html=True)
 
 # --- 탭 실행 ---
