@@ -44,7 +44,7 @@ def extract_text_from_pdf(file_name):
         return f"❌ PDF 읽기 오류: {e}"
     return text
 
-# --- 조항 추출 함수 (본문 추출 및 페이지 번호/빈 줄 압축) ---
+# --- 조항 추출 함수 ---
 def get_clause_text(pdf_text, clause_name):
     if not clause_name:
         return "조항 번호가 명확하지 않아 부분 추출이 어렵습니다. 하단에서 전체 본문을 확인해 주세요."
@@ -110,7 +110,7 @@ def get_clause_text(pdf_text, clause_name):
     
     return extracted_text
 
-# --- PDF 원문에 하이라이트 및 (신설)/(변경) 태그 동적 삽입 ---
+# --- PDF 원문에 하이라이트 적용 ---
 def highlight_differences(pdf_text, current_text, revised_text):
     if not pdf_text: return pdf_text
 
@@ -202,7 +202,7 @@ def highlight_differences(pdf_text, current_text, revised_text):
 
     return highlighted_text
 
-# --- UI 텍스트 자동 줄바꿈 포맷팅 함수 (1줄 띄어쓰기) ---
+# --- UI 텍스트 자동 줄바꿈 포맷팅 ---
 def format_ui_text(text):
     if not text: return ""
     t = str(text)
@@ -296,58 +296,58 @@ def load_detail_data_by_gid(gid):
         st.error(f"상세 데이터를 가져오는 중 에러가 발생했습니다: {e}")
         return pd.DataFrame()
 
-# --- [신규] 3. 2026년 list(pending issue) 탭 데이터 로드 ---
+# --- [완벽 수정] 3. 2026년 list(pending issue) 탭 전용 데이터 로드 (GID 직접 지정) ---
 @st.cache_data(ttl=10)
-def load_pending_data(sheet_name):
+def load_pending_data_by_gid(gid):
     try:
-        encoded_sheet_name = urllib.parse.quote(sheet_name)
         cache_buster = int(time.time())
-        # 시트 이름 "2026 list"를 기반으로 로드
-        csv_url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&sheet={encoded_sheet_name}&cb={cache_buster}"
+        # 시트 이름 인식 오류를 피하기 위해 GID(1846159023)를 강제로 적용합니다.
+        csv_url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={gid}&cb={cache_buster}"
         df_raw = pd.read_csv(csv_url, dtype=str, header=None)
         
         records = []
         curr_idx, rev_idx, reason_idx = 1, 2, 3
+        start_parsing = False
         
-        # 헤더 인덱스 찾기 (컬럼 A, B, C 유동성 대비)
-        for index, row in df_raw.iterrows():
-            vals = [str(x).strip() if str(x).strip() != 'nan' else '' for x in row.tolist()]
-            if '현행' in vals:
-                curr_idx = vals.index('현행')
-                if '개정(안)' in vals: rev_idx = vals.index('개정(안)')
-                if '개정 사유' in vals: reason_idx = vals.index('개정 사유')
-                break
-                
         for index, row in df_raw.iterrows():
             vals = [str(x).strip() if str(x).strip() != 'nan' else '' for x in row.tolist()]
             if all(v == '' for v in vals): continue
-            if '현행' in vals or '개정(안)' in vals: continue
-                
-            curr_text = vals[curr_idx] if len(vals) > curr_idx else ''
-            rev_text = vals[rev_idx] if len(vals) > rev_idx else ''
-            reason_text = vals[reason_idx] if len(vals) > reason_idx else ''
             
-            if curr_text or rev_text or reason_text:
-                records.append({
-                    '현행': curr_text,
-                    '개정(안)': rev_text,
-                    '개정 사유': reason_text
-                })
+            # 헤더(현행, 개정안)를 찾는 로직
+            if '현행' in vals and ('개정(안)' in vals or '개정 (안)' in vals):
+                curr_idx = vals.index('현행')
+                rev_idx = vals.index('개정(안)') if '개정(안)' in vals else vals.index('개정 (안)')
+                reason_idx = vals.index('개정 사유') if '개정 사유' in vals else (rev_idx + 1)
+                start_parsing = True
+                continue
                 
+            if start_parsing:
+                curr_text = vals[curr_idx] if len(vals) > curr_idx else ''
+                rev_text = vals[rev_idx] if len(vals) > rev_idx else ''
+                reason_text = vals[reason_idx] if len(vals) > reason_idx else ''
+                
+                if curr_text or rev_text or reason_text:
+                    records.append({
+                        '현행': curr_text,
+                        '개정(안)': rev_text,
+                        '개정 사유': reason_text
+                    })
+                    
         df_ret = pd.DataFrame(records)
         if not df_ret.empty:
             df_ret = df_ret.drop_duplicates().reset_index(drop=True)
         return df_ret
     except Exception as e:
-        st.error(f"'{sheet_name}' 데이터를 가져오는 중 에러가 발생했습니다: {e}")
+        st.error(f"2026년 대기 항목 로드 중 에러가 발생했습니다: {e}")
         return pd.DataFrame()
 
 # --- 데이터 가져오기 ---
 df_simple = load_simple_data("simple")
 df_detail = load_detail_data_by_gid("1205780686")
-df_pending = load_pending_data("2026 list")  # [신규] 2026년 pending 데이터 로드
+# 형님이 올려주신 이미지 주소창의 GID를 꽂아넣었습니다.
+df_pending = load_pending_data_by_gid("1846159023")  
 
-# --- 화면 탭 구성 (3개 탭으로 확장) ---
+# --- 화면 탭 구성 ---
 tab1, tab2, tab3 = st.tabs(["📑 요약 버전 (Simple)", "📄 상세 버전 (신구조문 대비표)", "📝 2026년 list(pending issue)"])
 
 # --- 1. 요약 버전 (Simple) 탭 렌더링 ---
@@ -474,7 +474,7 @@ def render_detail_tab(df):
             
             st.markdown("<hr style='margin: 10px 0;'>", unsafe_allow_html=True)
 
-# --- [신규] 3. 2026년 list(pending issue) 탭 렌더링 ---
+# --- 3. 2026년 list(pending issue) 탭 렌더링 ---
 def render_pending_tab(df):
     st.markdown("### 📝 2026년 개정 대기 항목 (Pending Issues)")
     st.caption("마케팅본부 팀에서 수합 중인 내년도 개정 검토안 목록입니다.")
