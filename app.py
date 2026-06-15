@@ -202,14 +202,13 @@ def highlight_differences(pdf_text, current_text, revised_text):
 
     return highlighted_text
 
-# --- [신규] UI 텍스트간 실시간 비교용 하이라이트 함수 (2026년 list 탭에서 사용) ---
+# --- UI 텍스트간 실시간 비교용 하이라이트 함수 (2026년 list 탭에서 사용) ---
 def highlight_ui_differences(current_text, revised_text):
     if not revised_text: return revised_text
 
     curr_str = str(current_text)
     rev_str = str(revised_text)
 
-    # 1. 개정안 문구에서 메모 검토 단어 및 줄바꿈 분리
     split_pattern = r'생략|\(신설\)|\(변경\)|\(삭제\)|\n'
     rev_parts = re.split(split_pattern, rev_str)
 
@@ -233,7 +232,6 @@ def highlight_ui_differences(current_text, revised_text):
     if not targets:
         return rev_str
 
-    # 2. 개정안 후보 문구 압축 인덱스 맵 생성
     stripped_rev = ""
     mapping = []
     for i, char in enumerate(rev_str):
@@ -267,7 +265,6 @@ def highlight_ui_differences(current_text, revised_text):
             else:
                 merged_spans.append(s)
 
-    # 3. 변경된 부분만 붉은색으로 치환
     highlighted_text = rev_str
     for start, end in reversed(merged_spans):
         part1 = highlighted_text[:start]
@@ -371,7 +368,7 @@ def load_detail_data_by_gid(gid):
         st.error(f"상세 데이터를 가져오는 중 에러가 발생했습니다: {e}")
         return pd.DataFrame()
 
-# --- 3. 2026년 list(pending issue) 탭 전용 데이터 로드 (GID 지정) ---
+# --- 3. 2026년 list(pending issue) 탭 전용 데이터 로드 ---
 @st.cache_data(ttl=10)
 def load_pending_data_by_gid(gid):
     try:
@@ -478,7 +475,7 @@ def render_simple_tab(df, tab_name="Simple"):
                 pdf_text = extract_text_from_pdf(FILE_MAP[matched_year_key])
                 st.text_area(label="전체 파일 본문", value=pdf_text, height=450, key=f"pdf_area_{tab_name}_{selected_idx}")
 
-# --- 2. 상세 버전 탭 렌더링 ---
+# --- 2. [디자인 통합] 상세 버전 탭 렌더링 ---
 def render_detail_tab(df):
     if df.empty:
         st.info("상세 탭 데이터가 없습니다.")
@@ -504,13 +501,22 @@ def render_detail_tab(df):
                 col1, col2, col3 = st.columns([4, 4, 3])
                 with col1:
                     st.markdown("##### ⬅️ 현행")
-                    st.info(format_ui_text(row['현행']) if row['현행'] else "(내용 없음)")
+                    # 3번째 탭과 완전히 일치하는 청색 커스텀 HTML 컨테이너 적용
+                    st.markdown(f"""
+                        <div style="background-color: #f0f6fc; border-left: 5px solid #1f6feb; padding: 12px; border-radius: 6px; white-space: pre-wrap; font-family: inherit; font-size: 14px; line-height: 1.6;">{format_ui_text(row['현행']) if row['현행'] else '(내용 없음)'}</div>
+                    """, unsafe_allow_html=True)
                 with col2:
                     st.markdown("##### ➡️ 개정(안)")
-                    st.success(format_ui_text(row['개정(안)']) if row['개정(안)'] else "(내용 없음)")
+                    # 3번째 탭과 완전히 일치하는 녹색 커스텀 HTML 컨테이너 적용
+                    st.markdown(f"""
+                        <div style="background-color: #dafbe1; border-left: 5px solid #2ea44f; padding: 12px; border-radius: 6px; white-space: pre-wrap; font-family: inherit; font-size: 14px; line-height: 1.6;">{format_ui_text(row['개정(안)']) if row['개정(안)'] else '(내용 없음)'}</div>
+                    """, unsafe_allow_html=True)
                 with col3:
                     st.markdown("##### 📝 개정 사유")
-                    st.warning(format_ui_text(row['개정 사유']) if row['개정 사유'] else "(내용 없음)")
+                    # 3번째 탭과 완전히 일치하는 황색 커스텀 HTML 컨테이너 적용
+                    st.markdown(f"""
+                        <div style="background-color: #fff8c5; border-left: 5px solid #9e6a03; padding: 12px; border-radius: 6px; white-space: pre-wrap; font-family: inherit; font-size: 14px; line-height: 1.6;">{format_ui_text(row['개정 사유']) if row['개정 사유'] else '(내용 없음)'}</div>
+                    """, unsafe_allow_html=True)
             
             clause_match = re.search(r'(제\s*\d+\s*조)', str(row['현행']) + str(row['개정(안)']))
             clause_name = clause_match.group(1).replace(" ", "") if clause_match else ""
@@ -546,7 +552,7 @@ def render_detail_tab(df):
             
             st.markdown("<hr style='margin: 10px 0;'>", unsafe_allow_html=True)
 
-# --- 3. [수정 및 고도화] 2026년 list(pending issue) 탭 렌더링 (실시간 붉은색 하이라이트 적용) ---
+# --- 3. 2026년 list(pending issue) 탭 렌더링 ---
 def render_pending_tab(df):
     st.markdown("### 📝 2026년 개정 대기 항목 (Pending Issues)")
     st.caption("마케팅본부 팀에서 수합 중인 내년도 개정 검토안 목록입니다.")
@@ -561,17 +567,13 @@ def render_pending_tab(df):
             
             with col1:
                 st.markdown("##### ⬅️ 현행")
-                # HTML 박스로 렌더링하여 깔끔한 단락 구분 유지
                 st.markdown(f"""
                     <div style="background-color: #f0f6fc; border-left: 5px solid #1f6feb; padding: 12px; border-radius: 6px; white-space: pre-wrap; font-family: inherit; font-size: 14px; line-height: 1.6;">{row['현행'] if row['현행'] else '(내용 없음)'}</div>
                 """, unsafe_allow_html=True)
                 
             with col2:
                 st.markdown("##### ➡️ 개정(안) 후보")
-                # [핵심] 현행 데이터와 실시간 비교하여 추가/변경된 부분만 붉은색으로 치환
                 highlighted_rev = highlight_ui_differences(row['현행'], row['개정(안)'])
-                
-                # HTML 뷰어로 교체하여 빨간색 하이라이트 효과 표출
                 st.markdown(f"""
                     <div style="background-color: #dafbe1; border-left: 5px solid #2ea44f; padding: 12px; border-radius: 6px; white-space: pre-wrap; font-family: inherit; font-size: 14px; line-height: 1.6;">{highlighted_rev if highlighted_rev else '(내용 없음)'}</div>
                 """, unsafe_allow_html=True)
