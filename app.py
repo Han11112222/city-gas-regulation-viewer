@@ -107,6 +107,47 @@ def get_clause_text(pdf_text, clause_name):
     
     return extracted_text
 
+# --- [신규] 현행과 개정안을 비교하여 추가/변경된 부분만 붉은색으로 칠하는 함수 ---
+def highlight_differences(pdf_text, current_text, revised_text):
+    if not pdf_text:
+        return pdf_text
+        
+    # 현행과 개정안을 줄바꿈 단위로 쪼갬
+    curr_lines = [l.strip() for l in str(current_text).split('\n') if l.strip()]
+    rev_lines = [l.strip() for l in str(revised_text).split('\n') if l.strip()]
+    
+    targets = []
+    for r_line in rev_lines:
+        # 1. 현행에 완전히 똑같이 있는 문구는 하이라이트에서 제외
+        if any(r_line == c_line for c_line in curr_lines):
+            continue
+            
+        # 2. '(신설)', '(변경)', '(생략)' 등 식별용 꼬리표 텍스트만 지워서 순수 문장 확보
+        clean_r = re.sub(r'\((신설|변경|생략)\)', '', r_line).strip()
+        
+        # 3. 너무 짧은 문자열은 오류 방지를 위해 패스
+        if len(clean_r) < 5: 
+            continue
+            
+        targets.append(clean_r)
+        
+    highlighted = pdf_text
+    for t in targets:
+        # PDF에서 발생할 수 있는 띄어쓰기 꼬임이나 무작위 줄바꿈을 완벽 대처하기 위해 정규식 패턴화
+        pattern = r'\s+'.join(re.escape(w) for w in t.split())
+        if pattern:
+            try:
+                # 일치하는 타겟 텍스트를 진한 빨간색 + 약간의 배경색으로 감싸서 출력
+                highlighted = re.sub(
+                    f'({pattern})', 
+                    r'<span style="color: #d32f2f; font-weight: bold; background-color: #ffebee;">\1</span>', 
+                    highlighted
+                )
+            except:
+                pass
+                
+    return highlighted
+
 # --- 1. Simple(요약) 탭 데이터 로드 ---
 @st.cache_data(ttl=10)
 def load_simple_data(sheet_name):
@@ -149,7 +190,7 @@ def load_simple_data(sheet_name):
         st.error(f"'{sheet_name}' 에러: {e}")
         return pd.DataFrame()
 
-# --- 2. 상세(신구조문) 탭 데이터 로드 (중복 제거 로직 추가) ---
+# --- 2. 상세(신구조문) 탭 데이터 로드 (중복 제거) ---
 @st.cache_data(ttl=10)
 def load_detail_data_by_gid(gid):
     try:
@@ -188,7 +229,6 @@ def load_detail_data_by_gid(gid):
                         '개정 사유': reason_text
                     })
         
-        # [핵심 수정 사항] 수집된 데이터 중 완전히 동일한 중복 행(예: 4조가 2번 들어간 경우)을 1개로 압축합니다.
         df_ret = pd.DataFrame(records)
         if not df_ret.empty:
             df_ret = df_ret.drop_duplicates().reset_index(drop=True)
@@ -205,7 +245,7 @@ df_detail = load_detail_data_by_gid("1205780686")
 # --- 화면 탭 구성 ---
 tab1, tab2 = st.tabs(["📑 요약 버전 (Simple)", "📄 상세 버전 (신구조문 대비표)"])
 
-# --- 1. 요약 버전 (Simple) 탭 렌더링 ---
+# --- 1. 요약 버전 (Simple) 탭 렌더링 (절대 수정 금지 구역) ---
 def render_simple_tab(df, tab_name="Simple"):
     if df.empty:
         st.info("시트에 데이터가 없거나 로드되지 않았습니다.")
@@ -261,7 +301,7 @@ def render_simple_tab(df, tab_name="Simple"):
                 pdf_text = extract_text_from_pdf(FILE_MAP[matched_year_key])
                 st.text_area(label="전체 파일 본문", value=pdf_text, height=450, key=f"pdf_area_{tab_name}_{selected_idx}")
 
-# --- 2. 상세 버전 탭 렌더링 ---
+# --- 2. 상세 버전 탭 렌더링 (붉은색 하이라이트 적용) ---
 def render_detail_tab(df):
     if df.empty:
         st.info("상세 탭 데이터가 없습니다.")
@@ -275,7 +315,6 @@ def render_detail_tab(df):
     for y in years_to_show:
         st.markdown(f"### ⚖️ {y}년 신구조문 대비표")
         
-        # 여기서도 이중 안전장치로 출력 전 한 번 더 중복을 제거합니다.
         y_df = df[df['연도'] == y].drop_duplicates().reset_index(drop=True)
         
         matched_year_key = next((k for k in FILE_MAP.keys() if k in y), None)
@@ -302,12 +341,32 @@ def render_detail_tab(df):
             expander_title = f"🔍 {clause_name} 원문 대조하기" if clause_name else "🔍 관련 원문 대조하기"
             with st.expander(expander_title):
                 if matched_year_key and pdf_text:
+                    # 1. 텍스트 추출
                     target_clause_text = get_clause_text(pdf_text, clause_name)
-                    st.text_area(
-                        label="PDF 원문 발췌", 
-                        value=target_clause_text, 
-                        height=250, 
-                        key=f"text_area_detail_{y}_{idx}"
+                    
+                    # 2. 신규/변경 텍스트 하이라이트(붉은색 렌더링) 처리
+                    highlighted_clause_text = highlight_differences(target_clause_text, row['현행'], row['개정(안)'])
+                    
+                    # 3. st.text_area 대신 스타일링된 HTML div 박스(st.markdown)를 사용하여 시각적 효과 구현
+                    st.markdown(f"**PDF 원문 발췌**")
+                    st.markdown(
+                        f"""
+                        <div style="
+                            height: 250px; 
+                            overflow-y: auto; 
+                            border: 1px solid #d0d7de; 
+                            padding: 15px; 
+                            border-radius: 6px; 
+                            background-color: #f6f8fa; 
+                            white-space: pre-wrap; 
+                            font-family: inherit;
+                            font-size: 14px;
+                            line-height: 1.6;
+                        ">
+                            {highlighted_clause_text}
+                        </div>
+                        """, 
+                        unsafe_allow_html=True
                     )
                 else:
                     st.warning("해당 연도의 PDF 문서가 연결되지 않았습니다.")
