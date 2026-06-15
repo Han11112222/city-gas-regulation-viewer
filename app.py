@@ -44,7 +44,7 @@ def extract_text_from_pdf(file_name):
         return f"❌ PDF 읽기 오류: {e}"
     return text
 
-# --- 조항 추출 함수 ---
+# --- 조항 추출 함수 (본문 추출 및 페이지 번호/빈 줄 압축) ---
 def get_clause_text(pdf_text, clause_name):
     if not clause_name:
         return "조항 번호가 명확하지 않아 부분 추출이 어렵습니다. 하단에서 전체 본문을 확인해 주세요."
@@ -102,48 +102,64 @@ def get_clause_text(pdf_text, clause_name):
     
     extracted_text = pdf_text[start_idx:end_idx].strip()
     
-    # 1. 페이지 번호 삭제
     extracted_text = re.sub(r'-\s*\d+\s*-', '', extracted_text)
-    # 2. [수정] 1줄 띄우기 삭제: 모든 2칸 이상의 빈 줄을 1칸으로 통일하여 간격 맞춤
     extracted_text = re.sub(r'[ \t]+\n', '\n', extracted_text)
     extracted_text = re.sub(r'\n{2,}', '\n', extracted_text).strip()
     
     return extracted_text
 
-# --- [초강력 수정] 띄어쓰기/줄바꿈 무시 원문 하이라이트 매핑 알고리즘 ---
+# --- [수정] PDF 원문에 하이라이트 및 (신설)/(변경) 태그 동적 삽입 ---
 def highlight_differences(pdf_text, current_text, revised_text):
     if not pdf_text: return pdf_text
 
     curr_str = str(current_text)
     rev_str = str(revised_text)
 
-    # 1. 개정안 쪼개기
-    split_pattern = r'생략|\(신설\)|\(변경\)|\(삭제\)|\n'
-    rev_parts = re.split(split_pattern, rev_str)
+    # 개정안 텍스트에서 (신설), (변경) 등의 꼬리표를 분리하여 함께 추출
+    parts = re.split(r'(\(신설\)|\(변경\)|\(삭제\))', rev_str)
 
     targets = []
     c_clean_for_match = re.sub(r'\s+', '', curr_str)
 
-    for part in rev_parts:
-        p_clean = re.sub(r'[①-⑳\d]+\s*~\s*[①-⑳\d]+', '', part)
+    current_text_buffer = ""
+    for part in parts:
+        if part in ['(신설)', '(변경)', '(삭제)']:
+            tag = part
+            text = current_text_buffer
+            current_text_buffer = "" 
+            
+            p_clean = re.sub(r'\((생략)\)', '', text)
+            p_clean = re.sub(r'[①-⑳\d]+\s*~\s*[①-⑳\d]+', '', p_clean)
+            p_clean = re.sub(r'제\s*\d+\s*조\s*\([^)]*\)', '', p_clean)
+            p_clean = re.sub(r'^[)\],.\s]+', '', p_clean).strip()
+            
+            if len(p_clean) >= 5:
+                p_clean_no_space = re.sub(r'\s+', '', p_clean)
+                if p_clean_no_space not in c_clean_for_match:
+                    p_clean_no_space = re.sub(r'[\'\"“”‘’]', '', p_clean_no_space)
+                    if len(p_clean_no_space) > 3:
+                        targets.append((p_clean_no_space, tag))
+        else:
+            current_text_buffer += part
+
+    # 꼬리표가 없던 나머지 문장들도 처리
+    if current_text_buffer:
+        text = current_text_buffer
+        p_clean = re.sub(r'\((생략)\)', '', text)
+        p_clean = re.sub(r'[①-⑳\d]+\s*~\s*[①-⑳\d]+', '', p_clean)
         p_clean = re.sub(r'제\s*\d+\s*조\s*\([^)]*\)', '', p_clean)
         p_clean = re.sub(r'^[)\],.\s]+', '', p_clean).strip()
-
-        if len(p_clean) < 5: continue
-
-        p_clean_no_space = re.sub(r'\s+', '', p_clean)
-        if p_clean_no_space in c_clean_for_match: continue
-
-        # 따옴표 등 특수문자 제거하여 순수 글자만 타겟팅
-        p_clean_no_space = re.sub(r'[\'\"“”‘’]', '', p_clean_no_space)
-        if len(p_clean_no_space) > 3:
-            targets.append(p_clean_no_space)
+        
+        if len(p_clean) >= 5:
+            p_clean_no_space = re.sub(r'\s+', '', p_clean)
+            if p_clean_no_space not in c_clean_for_match:
+                p_clean_no_space = re.sub(r'[\'\"“”‘’]', '', p_clean_no_space)
+                if len(p_clean_no_space) > 3:
+                    targets.append((p_clean_no_space, ""))
 
     if not targets:
         return pdf_text
 
-    # 2. PDF 원문에서 모든 띄어쓰기, 줄바꿈, 따옴표를 제거한 '압축 문자열' 생성
-    # 그리고 그 압축 문자가 원본의 몇 번째 위치에 있는지 인덱스 매핑을 기록합니다.
     stripped_pdf = ""
     mapping = []
     for i, char in enumerate(pdf_text):
@@ -151,24 +167,21 @@ def highlight_differences(pdf_text, current_text, revised_text):
             stripped_pdf += char
             mapping.append(i)
 
-    # 3. 압축 문자열에서 타겟(수정된 내용)을 찾고 원본 위치를 스팬(Span)으로 묶습니다.
     spans_to_highlight = []
-    for t in targets:
+    for t_text, tag in targets:
         start_pos = 0
         while True:
-            idx = stripped_pdf.find(t, start_pos)
+            idx = stripped_pdf.find(t_text, start_pos)
             if idx == -1: break
-            
             orig_start = mapping[idx]
-            orig_end = mapping[idx + len(t) - 1]
-            spans_to_highlight.append((orig_start, orig_end))
-            start_pos = idx + len(t)
+            orig_end = mapping[idx + len(t_text) - 1]
+            spans_to_highlight.append((orig_start, orig_end, tag))
+            start_pos = idx + len(t_text)
 
     if not spans_to_highlight:
         return pdf_text
 
-    # 겹치는 구역 병합
-    spans_to_highlight.sort()
+    spans_to_highlight.sort(key=lambda x: x[0])
     merged_spans = []
     for s in spans_to_highlight:
         if not merged_spans:
@@ -176,19 +189,37 @@ def highlight_differences(pdf_text, current_text, revised_text):
         else:
             last = merged_spans[-1]
             if s[0] <= last[1] + 1:
-                merged_spans[-1] = (last[0], max(last[1], s[1]))
+                merged_spans[-1] = (last[0], max(last[1], s[1]), last[2] or s[2])
             else:
                 merged_spans.append(s)
 
-    # 뒤에서부터 HTML 태그(붉은색)를 삽입하여 인덱스 꼬임 방지
     highlighted_text = pdf_text
-    for start, end in reversed(merged_spans):
+    for start, end, tag in reversed(merged_spans):
         part1 = highlighted_text[:start]
         part2 = highlighted_text[start:end+1]
         part3 = highlighted_text[end+1:]
-        highlighted_text = part1 + f'<span style="color: #d32f2f; font-weight: bold; background-color: #ffebee;">{part2}</span>' + part3
+        
+        # PDF 원문 하이라이트의 끝에 (신설), (변경) 등 태그를 붉은색으로 동적 추가
+        tag_html = f' <span style="color: #d32f2f; font-weight: bold;">{tag}</span>' if tag else ''
+        highlighted_text = part1 + f'<span style="color: #d32f2f; font-weight: bold; background-color: #ffebee;">{part2}</span>{tag_html}' + part3
 
     return highlighted_text
+
+# --- [신규] UI 텍스트 자동 줄바꿈 포맷팅 함수 (1줄 띄어쓰기) ---
+def format_ui_text(text):
+    if not text: return ""
+    t = str(text)
+    
+    # 1. 띄어쓰기 후 동그라미 번호(①~⑳)가 오면 자동으로 마크다운 줄바꿈(\n\n) 처리 (단, ⑤~⑦ 처럼 범위 지정일 때는 제외)
+    t = re.sub(r'(?<!\n)(?<!~)(?<!-)\s+([①-⑳])', r'\n\n\1', t)
+    
+    # 2. 띄어쓰기 후 '숫자. "단어"' 형태(예: 22. "검침"이란)가 오면 자동으로 줄바꿈 처리
+    t = re.sub(r'(?<!\n)\s+(\d{1,2}\.\s*[“"”\'A-Za-z가-힣])', r'\n\n\1', t)
+    
+    # 3. 기존의 1칸짜리 줄바꿈(\n)을 2칸(\n\n)으로 변환하여 Streamlit 화면에서 단락이 나뉘게 보장
+    t = re.sub(r'\n+', r'\n\n', t)
+    
+    return t.strip()
 
 # --- 1. Simple(요약) 탭 데이터 로드 ---
 @st.cache_data(ttl=10)
@@ -232,7 +263,7 @@ def load_simple_data(sheet_name):
         st.error(f"'{sheet_name}' 에러: {e}")
         return pd.DataFrame()
 
-# --- 2. 상세(신구조문) 탭 데이터 로드 (중복 제거) ---
+# --- 2. 상세(신구조문) 탭 데이터 로드 ---
 @st.cache_data(ttl=10)
 def load_detail_data_by_gid(gid):
     try:
@@ -369,13 +400,15 @@ def render_detail_tab(df):
                 col1, col2, col3 = st.columns([4, 4, 3])
                 with col1:
                     st.markdown("##### ⬅️ 현행")
-                    st.info(row['현행'] if row['현행'] else "(내용 없음)")
+                    # 현행 텍스트에도 자동 1줄 띄우기 포맷 적용
+                    st.info(format_ui_text(row['현행']) if row['현행'] else "(내용 없음)")
                 with col2:
                     st.markdown("##### ➡️ 개정(안)")
-                    st.success(row['개정(안)'] if row['개정(안)'] else "(내용 없음)")
+                    # 개정(안) 텍스트에 자동 1줄 띄우기 포맷 적용 (⑧, ⑨ 등 줄바꿈)
+                    st.success(format_ui_text(row['개정(안)']) if row['개정(안)'] else "(내용 없음)")
                 with col3:
                     st.markdown("##### 📝 개정 사유")
-                    st.warning(row['개정 사유'] if row['개정 사유'] else "(내용 없음)")
+                    st.warning(format_ui_text(row['개정 사유']) if row['개정 사유'] else "(내용 없음)")
             
             clause_match = re.search(r'(제\s*\d+\s*조)', str(row['현행']) + str(row['개정(안)']))
             clause_name = clause_match.group(1).replace(" ", "") if clause_match else ""
