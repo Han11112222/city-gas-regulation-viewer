@@ -44,48 +44,59 @@ def extract_text_from_pdf(file_name):
         return f"❌ PDF 읽기 오류: {e}"
     return text
 
-# --- [수정된 부분] 조항(예: 제4조) 추출 함수 (줄바꿈 무시 목차 완벽 회피) ---
+# --- [수정 및 고도화] 조항(예: 제4조) 추출 함수 (줄바꿈/변칙 목차 완벽 차단) ---
 def get_clause_text(pdf_text, clause_name):
     if not clause_name:
         return "조항 번호가 명확하지 않아 부분 추출이 어렵습니다. 하단에서 전체 본문을 확인해 주세요."
         
-    pattern = rf"({clause_name}(?:\s*\([^)]*\))?)"
+    # '제4조'에서 숫자만 분리 추출 (예: '4')
+    num_match = re.search(r'\d+', clause_name)
+    if not num_match:
+        return f"💡 '{clause_name}'에서 조항 번호를 식별할 수 없습니다."
+        
+    num = num_match.group()
+    # PDF 본문 특성상 '제 4 조'처럼 사이에 공백이 있을 수 있으므로 공백 유연성(\s*) 부여
+    pattern = rf"제\s*{num}\s*조"
     matches = list(re.finditer(pattern, pdf_text))
     
     if not matches:
-        return f"💡 PDF 전문에서 '{clause_name}' 텍스트 영역을 직접 매칭하지 못했습니다."
+        return f"💡 PDF 전문에서 '제{num}조' 텍스트 영역을 직접 매칭하지 못했습니다."
         
     start_idx = -1
     
     for match in matches:
-        # 매칭 지점부터 넉넉히 200글자를 가져옵니다. (줄바꿈이 섞여 있어도 감지 가능)
-        snippet = pdf_text[match.start():min(len(pdf_text), match.start() + 200)]
+        idx = match.start()
         
-        # 목차의 특징: 점(.), 가운뎃점(·), 기호(․) 등이 3개 이상 연속되거나
-        # '페이지 번호'를 암시하는 패턴이 바로 이어지면 목차로 간주하고 패스
-        if re.search(r'[\.·․]{3,}', snippet) or re.search(r'\b\d+\s*\n\s*\[?제\d+장', snippet):
+        # 매칭 지점부터 넉넉하게 뒤로 200글자 범위를 확보하여 컨텍스트 검사
+        snippet = pdf_text[idx:min(len(pdf_text), idx + 200)]
+        
+        # [핵심 보완] 줄바꿈(\n)이 채 채워지기 전에 점(.), 가운뎃점(·), 대시(-) 등이 3개 이상 연속되거나
+        # '제4조 ... 2' 와 같이 숫자가 바로 이어지는 목차 특유의 패턴이 감지되면 목차로 보고 패스
+        if re.search(r'[\.·․…─\-_]{3,}', snippet) or re.search(rf"제\s*{num}\s*조[\s\n]*\.+", snippet):
             continue
             
-        # 목차가 아니라고 판단되면 이곳을 본문의 시작점으로 확정
-        start_idx = match.start()
+        # 문서의 완전 앞부분(4000자 미만)에 위치하면서 뒤에 매칭이 더 남아있다면 높은 확률로 목차 페이지이므로 패스
+        if idx < 4000 and len(matches) > 1:
+            continue
+            
+        start_idx = idx
         break
         
-    # 만약 모두 목차로 걸러졌다면, 안전하게 두 번째 매칭 지점(보통 진짜 본문)을 사용합니다.
+    # 만약 정밀 필터링으로 인해 모두 목차로 분류되어 걸러졌다면, 안전장치로 가장 마지막 매칭 지점(진짜 본문)을 강제 지정
     if start_idx == -1:
-        start_idx = matches[1].start() if len(matches) > 1 else matches[0].start()
+        start_idx = matches[-1].start()
         
-    num_match = re.search(r'\d+', clause_name)
-    if num_match:
-        current_num = int(num_match.group())
-        # 다음 조항(예: 제5조 또는 제6조)의 시작 부분을 찾아 거기까지만 자름
-        next_clause_pattern = rf"\n\s*(제\s*{current_num + 1}\s*조|제\s*{current_num + 2}\s*조)"
-        next_match = re.search(next_clause_pattern, pdf_text[start_idx + 10:])
+    # 다음 조항(제5조 또는 제6조)의 시작 부분을 찾아 거기까지만 깔끔하게 슬라이싱
+    current_num = int(num)
+    next_clause_pattern = rf"\n\s*제\s*({current_num + 1}|{current_num + 2})\s*조"
+    next_match = re.search(next_clause_pattern, pdf_text[start_idx + 10:])
+    
+    if next_match:
+        end_idx = start_idx + 10 + next_match.start()
+        return pdf_text[start_idx:end_idx].strip()
         
-        if next_match:
-            end_idx = start_idx + 10 + next_match.start()
-            return pdf_text[start_idx:end_idx].strip()
-            
-    return pdf_text[start_idx:start_idx + 1500].strip() + "\n\n...(이하 생략 - 전체 본문 참조)..."
+    # 다음 조항을 찾지 못한 예외의 경우 넉넉하게 2500자 추출 후 생략 처리
+    return pdf_text[start_idx:start_idx + 2500].strip() + "\n\n...(이하 생략 - 전체 본문 참조)..."
 
 # --- 1. Simple(요약) 탭 데이터 로드 ---
 @st.cache_data(ttl=10)
@@ -180,7 +191,7 @@ df_detail = load_detail_data_by_gid("1205780686")
 # --- 화면 탭 구성 ---
 tab1, tab2 = st.tabs(["📑 요약 버전 (Simple)", "📄 상세 버전 (신구조문 대비표)"])
 
-# --- 1. 요약 버전 (Simple) 탭 렌더링 (이전 유지) ---
+# --- 1. 요약 버전 (Simple) 탭 렌더링 ---
 def render_simple_tab(df, tab_name="Simple"):
     if df.empty:
         st.info("시트에 데이터가 없거나 로드되지 않았습니다.")
@@ -236,7 +247,7 @@ def render_simple_tab(df, tab_name="Simple"):
                 pdf_text = extract_text_from_pdf(FILE_MAP[matched_year_key])
                 st.text_area(label="전체 파일 본문", value=pdf_text, height=450, key=f"pdf_area_{tab_name}_{selected_idx}")
 
-# --- 2. 상세 버전 탭 렌더링 (이전 유지) ---
+# --- 2. 상세 버전 탭 렌더링 ---
 def render_detail_tab(df):
     if df.empty:
         st.info("상세 탭 데이터가 없습니다.")
@@ -275,6 +286,7 @@ def render_detail_tab(df):
             expander_title = f"🔍 {clause_name} 원문 대조하기" if clause_name else "🔍 관련 원문 대조하기"
             with st.expander(expander_title):
                 if matched_year_key and pdf_text:
+                    # 줄바꿈 무시 목차 패스 알고리즘 적용
                     target_clause_text = get_clause_text(pdf_text, clause_name)
                     st.text_area(
                         label="PDF 원문 발췌", 
