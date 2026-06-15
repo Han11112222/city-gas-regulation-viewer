@@ -4,7 +4,7 @@ import pdfplumber
 import os
 import urllib.parse
 import numpy as np
-import time  # [수정] 구글 시트 캐시 우회를 위해 추가
+import time
 
 # --- 페이지 기본 설정 ---
 st.set_page_config(page_title="도시가스 공급규정 개정 이력 관리 시스템", layout="wide")
@@ -44,13 +44,10 @@ def extract_text_from_pdf(file_name):
     return text
 
 # --- 구글 시트 데이터 로드 및 전처리 함수 ---
-@st.cache_data(ttl=10) # [수정] 0초 대신 10초로 두어 불필요한 과부하를 방지
+@st.cache_data(ttl=10)
 def load_cleaned_data(sheet_name):
     try:
         encoded_sheet_name = urllib.parse.quote(sheet_name)
-        
-        # [수정] 구글 서버측 캐시 강제 우회 (Cache Busting)
-        # 타임스탬프를 쿼리에 추가하여 항상 새로운 URL로 인식하게 만듭니다.
         cache_buster = int(time.time())
         csv_url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&sheet={encoded_sheet_name}&cb={cache_buster}"
         
@@ -108,7 +105,27 @@ def render_tab_content(df, tab_name):
     date_col = df.columns[0] 
     df[date_col] = df[date_col].astype(str).str.strip()
     
-    unique_dates = sorted([d for d in df[date_col].unique() if d and d != "nan" and not d.startswith("공란_")], reverse=True)
+    # -----------------------------------------------------------------
+    # [수정] 1. 2016년 이후 데이터 필터링 및 2. 최신순(내림차순) 정렬 적용
+    # -----------------------------------------------------------------
+    # 연도를 안전하게 추출하기 위해 정규표현식(첫 4자리 숫자) 사용
+    df['_year'] = df[date_col].str.extract(r'^(\d{4})').astype(float)
+    
+    # 2016년 이후 데이터만 필터링
+    df = df[df['_year'] >= 2016].copy()
+    
+    # '2016.7.' 와 같은 형태에서 정확한 정렬을 위해 임시 datetime 컬럼 생성 (끝에 붙은 마침표 제거)
+    df['_date_sort'] = pd.to_datetime(df[date_col].str.replace(r'\.$', '', regex=True), format='mixed', errors='coerce')
+    
+    # 최신순(내림차순) 정렬 진행
+    df = df.sort_values(by=['_date_sort', date_col], ascending=[False, False])
+    
+    # 임시로 만든 컬럼 제거
+    df = df.drop(columns=['_year', '_date_sort'])
+    # -----------------------------------------------------------------
+    
+    # 정렬된 DataFrame을 기반으로 고유 일자 목록 생성 (순서 유지)
+    unique_dates = [d for d in df[date_col].unique() if d and d != "nan" and not d.startswith("공란_")]
 
     selected_date = st.selectbox(
         f"📅 조회할 {date_col if not date_col.startswith('공란_') else '일자'} 선택 ({tab_name})", 
@@ -186,8 +203,6 @@ def render_tab_content(df, tab_name):
         target_date_str = str(chosen_row[date_col])
         matched_year_key = None
         
-        # [수정] PDF 연도 매칭 로직 보완
-        # 날짜 문자열에 '2025'가 명시적으로 없더라도 대응 가능하도록 로직을 강화할 수 있습니다.
         for y_key in FILE_MAP.keys():
             if y_key in target_date_str:
                 matched_year_key = y_key
