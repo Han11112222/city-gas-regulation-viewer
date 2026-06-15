@@ -44,12 +44,12 @@ def extract_text_from_pdf(file_name):
         return f"❌ PDF 읽기 오류: {e}"
     return text
 
-# --- [수정] 조항(예: 제4조) 추출 함수 (목차 회피 로직 추가) ---
+# --- [고도화] 조항(예: 제4조) 추출 함수 (목차 회피) ---
 def get_clause_text(pdf_text, clause_name):
     if not clause_name:
         return "조항 번호가 명확하지 않아 부분 추출이 어렵습니다. 하단에서 전체 본문을 확인해 주세요."
         
-    pattern = rf"({clause_name}\s*\(.*?\)|{clause_name})"
+    pattern = rf"({clause_name}(?:\s*\([^)]*\))?)"
     matches = list(re.finditer(pattern, pdf_text))
     
     if not matches:
@@ -57,38 +57,40 @@ def get_clause_text(pdf_text, clause_name):
         
     start_idx = -1
     
-    # 여러 매칭 결과 중 목차를 건너뛰고 실제 본문을 찾습니다.
+    # 매칭된 텍스트 중 목차(점선이나 끝에 숫자가 있는 줄)를 건너뛰고 실제 본문을 탐색
     for match in matches:
-        # 매칭된 지점 바로 뒤의 텍스트(약 50자)를 확인
-        snippet = pdf_text[match.end():min(len(pdf_text), match.end() + 50)]
+        line_start = pdf_text.rfind('\n', 0, match.start())
+        line_end = pdf_text.find('\n', match.end())
+        if line_start == -1: line_start = 0
+        if line_end == -1: line_end = match.end() + 50
         
-        # 목차의 특징: 점(.)이 3개 이상 연속되거나 말줄임표(…)가 있는 경우 패스
-        if re.search(r'\.{3,}', snippet) or "…" in snippet:
+        line_text = pdf_text[line_start:line_end]
+        
+        # 목차의 전형적인 특징 방어: 점(.) 3개 이상 연속 또는 맨 끝에 페이지 번호 단독 존재
+        if re.search(r'\.{3,}', line_text) or re.search(r'[\.\s]+\d+\s*$', line_text):
             continue
             
-        # 목차가 아니라고 판단되면 이곳을 본문의 시작점으로 확정
         start_idx = match.start()
         break
         
-    # 만약 모두 목차 형태로 잡혔거나 예외가 발생하면 가장 마지막 매칭(보통 본문)을 선택
+    # 만약 본문을 찾지 못했다면(전부 목차로 걸러졌다면) 가장 마지막 매칭 지점을 사용
     if start_idx == -1:
         start_idx = matches[-1].start()
         
     num_match = re.search(r'\d+', clause_name)
     if num_match:
         current_num = int(num_match.group())
-        # 다음 조항 찾기 (현재 조항의 1~2개 뒤 조항 번호 탐색)
-        next_clause_pattern = rf"(제\s*{current_num + 1}\s*조|제\s*{current_num + 2}\s*조)"
+        # 다음 조항(예: 제5조 또는 제6조)의 시작 부분을 찾아 거기까지만 자름
+        next_clause_pattern = rf"\n\s*(제\s*{current_num + 1}\s*조|제\s*{current_num + 2}\s*조)"
         next_match = re.search(next_clause_pattern, pdf_text[start_idx + 10:])
         
         if next_match:
             end_idx = start_idx + 10 + next_match.start()
             return pdf_text[start_idx:end_idx].strip()
             
-    # 다음 조항을 못 찾으면 넉넉하게 1500자 추출 후 생략 처리
-    return pdf_text[start_idx:start_idx + 1500].strip() + "\n\n...(이하 생략)..."
+    return pdf_text[start_idx:start_idx + 1500].strip() + "\n\n...(이하 생략 - 전체 본문 참조)..."
 
-# --- 1. Simple(요약) 탭 데이터 로드 함수 ---
+# --- 1. Simple(요약) 탭 데이터 로드 ---
 @st.cache_data(ttl=10)
 def load_simple_data(sheet_name):
     try:
@@ -181,7 +183,7 @@ df_detail = load_detail_data_by_gid("1205780686")
 # --- 화면 탭 구성 ---
 tab1, tab2 = st.tabs(["📑 요약 버전 (Simple)", "📄 상세 버전 (신구조문 대비표)"])
 
-# --- 1. 요약 버전 (Simple) 탭 렌더링 ---
+# --- 1. [완전 개편] 요약 버전 (Simple) 탭 렌더링 ---
 def render_simple_tab(df, tab_name="Simple"):
     if df.empty:
         st.info("시트에 데이터가 없거나 로드되지 않았습니다.")
@@ -190,96 +192,57 @@ def render_simple_tab(df, tab_name="Simple"):
     date_col = df.columns[0] 
     df[date_col] = df[date_col].astype(str).str.strip()
     
+    # 2016년 이후 데이터만 필터링 후 최신순 정렬
     df['_year'] = df[date_col].str.extract(r'^(\d{4})').astype(float)
     df = df[df['_year'] >= 2016].copy()
     
     df['_date_sort'] = pd.to_datetime(df[date_col].str.replace(r'\.$', '', regex=True), format='mixed', errors='coerce')
-    df = df.sort_values(by=['_date_sort', date_col], ascending=[False, False])
+    df = df.sort_values(by=['_date_sort', date_col], ascending=[False, False]).reset_index(drop=True)
     df = df.drop(columns=['_year', '_date_sort'])
     
-    unique_dates = [d for d in df[date_col].unique() if d and d != "nan" and not d.startswith("공란_")]
-
-    selected_date = st.selectbox(
-        f"📅 조회할 {date_col if not date_col.startswith('공란_') else '일자'} 선택 ({tab_name})", 
-        ["전체 보기"] + unique_dates, 
-        key=f"select_{tab_name}"
+    st.markdown(f"### 🔍 항목별 상세 내용 및 원문 대조")
+    
+    # 리스트 박스 옵션 생성 (연도 + 개정 내용 요약)
+    row_options = []
+    for idx, row in df.iterrows():
+        hint = f"[{row[date_col]}] "
+        valid_cols_for_hint = [c for c in df.columns if not c.startswith("공란_")]
+        second_col = valid_cols_for_hint[1] if len(valid_cols_for_hint) > 1 else date_col
+        hint += f"{str(row[second_col])[:45]}..."
+        row_options.append((idx, hint))
+        
+    # 상단에 단일 셀렉트박스 배치 (최신 항목이 기본값으로 선택됨)
+    selected_idx = st.selectbox(
+        "자세히 볼 항목을 선택하세요:",
+        options=[opt[0] for opt in row_options],
+        format_func=lambda x: next(opt[1] for opt in row_options if opt[0] == x),
+        key=f"row_box_{tab_name}"
     )
     
-    filtered_df = df.copy()
-    if selected_date != "전체 보기":
-        filtered_df = filtered_df[filtered_df[date_col] == selected_date]
-
-    filtered_df = filtered_df.reset_index(drop=True)
-
-    st.markdown(f"##### 📊 개정 이력 목록")
-    if not filtered_df.empty:
-        display_df = filtered_df.copy()
-        
-        valid_display_cols = [col for col in display_df.columns if not col.startswith("공란_")]
-        display_df = display_df[valid_display_cols]
-        display_df.index = range(1, len(display_df) + 1)
-        
-        css = "<style>\n"
-        css += '[data-testid="stTable"] table { width: 100% !important; }\n'
-        for i, col in enumerate(display_df.columns):
-            if "내용" in col:
-                css += f'[data-testid="stTable"] th:nth-child({i+2}), [data-testid="stTable"] td:nth-child({i+2}) {{ width: 50% !important; }}\n'
-            elif "사유" in col:
-                css += f'[data-testid="stTable"] th:nth-child({i+2}), [data-testid="stTable"] td:nth-child({i+2}) {{ width: 25% !important; }}\n'
-        css += "</style>"
-        st.markdown(css, unsafe_allow_html=True)
-        
-        st.table(display_df)
-    else:
-        st.write("선택한 조건의 데이터가 없습니다.")
+    chosen_row = df.loc[selected_idx]
+    valid_cols = [c for c in df.columns if not c.startswith("공란_")]
+    num_valid_cols = len(valid_cols)
     
-    st.divider()
+    # [현행 표 삭제 완료] 선택한 데이터의 3열(일자, 주요 개정 내용, 변경 사유)만 즉시 표시
+    if num_valid_cols > 0:
+        cols = st.columns(num_valid_cols)
+        for i, col_name in enumerate(valid_cols):
+            with cols[i]:
+                st.markdown(f"**📍 {col_name}**")
+                st.info(str(chosen_row[col_name]))
     
-    if not filtered_df.empty:
-        st.subheader("🔍 항목별 상세 내용 및 원문 대조")
-        
-        row_options = []
-        for idx, row in filtered_df.iterrows():
-            hint = f"[{row[date_col]}] "
-            valid_cols_for_hint = [c for c in df.columns if not c.startswith("공란_")]
-            second_col = valid_cols_for_hint[1] if len(valid_cols_for_hint) > 1 else date_col
-            hint += f"{str(row[second_col])[:30]}..."
-            row_options.append((idx, hint))
-            
-        selected_idx = st.selectbox(
-            "자세히 볼 항목을 선택하세요:",
-            options=[opt[0] for opt in row_options],
-            format_func=lambda x: next(opt[1] for opt in row_options if opt[0] == x),
-            key=f"row_box_{tab_name}"
-        )
-        
-        chosen_row = filtered_df.loc[selected_idx]
-        
-        valid_cols = [c for c in df.columns if not c.startswith("공란_")]
-        num_valid_cols = len(valid_cols)
-        
-        if num_valid_cols > 0:
-            cols = st.columns(num_valid_cols)
-            for i, col_name in enumerate(valid_cols):
-                with cols[i]:
-                    st.markdown(f"**📍 {col_name}**")
-                    st.info(str(chosen_row[col_name]))
-        
-        st.markdown("<br>", unsafe_allow_html=True)
-        
-        target_date_str = str(chosen_row[date_col])
-        matched_year_key = None
-        for y_key in FILE_MAP.keys():
-            if y_key in target_date_str:
-                matched_year_key = y_key
-                break
-        
-        if matched_year_key:
-            st.markdown(f"### 📄 {matched_year_key}년 공급규정 전문")
-            with st.expander(f"🔍 {FILE_MAP[matched_year_key]} 원문 텍스트 펼치기", expanded=True):
-                with st.spinner("PDF 문서 읽어오는 중..."):
-                    pdf_text = extract_text_from_pdf(FILE_MAP[matched_year_key])
-                    st.text_area(label="전체 파일 본문", value=pdf_text, height=450, key=f"pdf_area_{tab_name}_{selected_idx}")
+    st.markdown("<br>", unsafe_allow_html=True)
+    
+    target_date_str = str(chosen_row[date_col])
+    matched_year_key = next((k for k in FILE_MAP.keys() if k in target_date_str), None)
+    
+    if matched_year_key:
+        st.markdown(f"### 📄 {matched_year_key}년 공급규정 전문")
+        # 공간 확보를 위해 요약 탭의 원문 뷰어는 기본적으로 닫힌 상태(expanded=False)로 세팅
+        with st.expander(f"🔍 {FILE_MAP[matched_year_key]} 원문 텍스트 펼치기", expanded=False):
+            with st.spinner("PDF 문서 읽어오는 중..."):
+                pdf_text = extract_text_from_pdf(FILE_MAP[matched_year_key])
+                st.text_area(label="전체 파일 본문", value=pdf_text, height=450, key=f"pdf_area_{tab_name}_{selected_idx}")
 
 # --- 2. 상세 버전 탭 렌더링 ---
 def render_detail_tab(df):
@@ -320,6 +283,7 @@ def render_detail_tab(df):
             expander_title = f"🔍 {clause_name} 원문 대조하기" if clause_name else "🔍 관련 원문 대조하기"
             with st.expander(expander_title):
                 if matched_year_key and pdf_text:
+                    # 향상된 본문 매칭 함수 적용
                     target_clause_text = get_clause_text(pdf_text, clause_name)
                     st.text_area(
                         label="PDF 원문 발췌", 
