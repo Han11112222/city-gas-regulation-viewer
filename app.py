@@ -44,7 +44,7 @@ def extract_text_from_pdf(file_name):
         return f"❌ PDF 읽기 오류: {e}"
     return text
 
-# --- 조항 추출 함수 (다음 '장' 인식 및 페이지 번호 삭제 적용) ---
+# --- 조항 추출 함수 ---
 def get_clause_text(pdf_text, clause_name):
     if not clause_name:
         return "조항 번호가 명확하지 않아 부분 추출이 어렵습니다. 하단에서 전체 본문을 확인해 주세요."
@@ -102,70 +102,93 @@ def get_clause_text(pdf_text, clause_name):
     
     extracted_text = pdf_text[start_idx:end_idx].strip()
     
+    # 1. 페이지 번호 삭제
     extracted_text = re.sub(r'-\s*\d+\s*-', '', extracted_text)
-    extracted_text = re.sub(r'\n{3,}', '\n\n', extracted_text).strip()
+    # 2. [수정] 1줄 띄우기 삭제: 모든 2칸 이상의 빈 줄을 1칸으로 통일하여 간격 맞춤
+    extracted_text = re.sub(r'[ \t]+\n', '\n', extracted_text)
+    extracted_text = re.sub(r'\n{2,}', '\n', extracted_text).strip()
     
     return extracted_text
 
-# --- [완벽 수정] 현행과 개정안을 비교하여 추가/변경된 부분만 붉은색 하이라이트 ---
+# --- [초강력 수정] 띄어쓰기/줄바꿈 무시 원문 하이라이트 매핑 알고리즘 ---
 def highlight_differences(pdf_text, current_text, revised_text):
-    if not pdf_text:
-        return pdf_text
-        
+    if not pdf_text: return pdf_text
+
     curr_str = str(current_text)
     rev_str = str(revised_text)
-    
-    # 1. 사람이 스프레드시트에 작성한 메모용 구분자들을 기준으로 문장을 분리합니다.
+
+    # 1. 개정안 쪼개기
     split_pattern = r'생략|\(신설\)|\(변경\)|\(삭제\)|\n'
     rev_parts = re.split(split_pattern, rev_str)
-    
+
     targets = []
-    c_clean_for_match = re.sub(r'\s+', '', curr_str) # 현행과 비교할 때 공백을 무시하여 정확도 상승
-    
+    c_clean_for_match = re.sub(r'\s+', '', curr_str)
+
     for part in rev_parts:
-        # "1~21" 또는 "①~⑦" 같은 조항 범위 생략 메모 지우기
         p_clean = re.sub(r'[①-⑳\d]+\s*~\s*[①-⑳\d]+', '', part)
-        # "제4조(용어의 정의)" 등 앞부분 조항 제목 지우기
         p_clean = re.sub(r'제\s*\d+\s*조\s*\([^)]*\)', '', p_clean)
-        # 문자열 앞에 남은 쓸데없는 괄호나 기호들 정리
         p_clean = re.sub(r'^[)\],.\s]+', '', p_clean).strip()
-        
-        # 의미 없는 짧은 조각들은 패스
-        if len(p_clean) < 5:
-            continue
-            
-        # 2. 현행(기존 규정)에 이 문장이 그대로 존재한다면, 개정된 게 아니므로 패스!
+
+        if len(p_clean) < 5: continue
+
         p_clean_no_space = re.sub(r'\s+', '', p_clean)
-        if p_clean_no_space in c_clean_for_match:
-            continue
-            
-        # 필터를 통과한 '진짜 개정된 문장'만 타겟으로 저장
-        targets.append(p_clean)
-        
-    highlighted = pdf_text
+        if p_clean_no_space in c_clean_for_match: continue
+
+        # 따옴표 등 특수문자 제거하여 순수 글자만 타겟팅
+        p_clean_no_space = re.sub(r'[\'\"“”‘’]', '', p_clean_no_space)
+        if len(p_clean_no_space) > 3:
+            targets.append(p_clean_no_space)
+
+    if not targets:
+        return pdf_text
+
+    # 2. PDF 원문에서 모든 띄어쓰기, 줄바꿈, 따옴표를 제거한 '압축 문자열' 생성
+    # 그리고 그 압축 문자가 원본의 몇 번째 위치에 있는지 인덱스 매핑을 기록합니다.
+    stripped_pdf = ""
+    mapping = []
+    for i, char in enumerate(pdf_text):
+        if not char.isspace() and char not in ['\'', '"', '“', '”', '‘', '’']:
+            stripped_pdf += char
+            mapping.append(i)
+
+    # 3. 압축 문자열에서 타겟(수정된 내용)을 찾고 원본 위치를 스팬(Span)으로 묶습니다.
+    spans_to_highlight = []
     for t in targets:
-        words = t.split()
-        escaped_words = []
-        for w in words:
-            ew = re.escape(w)
-            # 스프레드시트의 따옴표(“)와 PDF의 따옴표(")가 달라도 무조건 매칭되도록 처리
-            ew = re.sub(r'[\'\"“”‘’]', r'[\'\"“”‘’]', ew)
-            escaped_words.append(ew)
-        
-        # 단어 사이사이에 어떤 길이의 띄어쓰기나 줄바꿈이 있어도 포용하도록 \s* 강력 적용
-        pattern = r'\s*'.join(escaped_words)
-        
-        try:
-            # 매칭된 본문을 붉은색 글자와 연한 배경색 태그로 감싸기
-            highlighted = re.sub(
-                f'({pattern})', 
-                r'<span style="color: #d32f2f; font-weight: bold; background-color: #ffebee;">\1</span>', 
-                highlighted
-            )
-        except Exception as e:
-            pass
+        start_pos = 0
+        while True:
+            idx = stripped_pdf.find(t, start_pos)
+            if idx == -1: break
             
-    return highlighted
+            orig_start = mapping[idx]
+            orig_end = mapping[idx + len(t) - 1]
+            spans_to_highlight.append((orig_start, orig_end))
+            start_pos = idx + len(t)
+
+    if not spans_to_highlight:
+        return pdf_text
+
+    # 겹치는 구역 병합
+    spans_to_highlight.sort()
+    merged_spans = []
+    for s in spans_to_highlight:
+        if not merged_spans:
+            merged_spans.append(s)
+        else:
+            last = merged_spans[-1]
+            if s[0] <= last[1] + 1:
+                merged_spans[-1] = (last[0], max(last[1], s[1]))
+            else:
+                merged_spans.append(s)
+
+    # 뒤에서부터 HTML 태그(붉은색)를 삽입하여 인덱스 꼬임 방지
+    highlighted_text = pdf_text
+    for start, end in reversed(merged_spans):
+        part1 = highlighted_text[:start]
+        part2 = highlighted_text[start:end+1]
+        part3 = highlighted_text[end+1:]
+        highlighted_text = part1 + f'<span style="color: #d32f2f; font-weight: bold; background-color: #ffebee;">{part2}</span>' + part3
+
+    return highlighted_text
 
 # --- 1. Simple(요약) 탭 데이터 로드 ---
 @st.cache_data(ttl=10)
@@ -360,13 +383,9 @@ def render_detail_tab(df):
             expander_title = f"🔍 {clause_name} 원문 대조하기" if clause_name else "🔍 관련 원문 대조하기"
             with st.expander(expander_title):
                 if matched_year_key and pdf_text:
-                    # 1. 대상 조항 원문 가져오기
                     target_clause_text = get_clause_text(pdf_text, clause_name)
-                    
-                    # 2. 개정안에 추가/변경된 부분만 붉은색으로 칠하기
                     highlighted_clause_text = highlight_differences(target_clause_text, row['현행'], row['개정(안)'])
                     
-                    # 3. HTML 마크다운을 통해 색상 서식 적용 렌더링
                     st.markdown(f"**PDF 원문 발췌**")
                     st.markdown(
                         f"""
