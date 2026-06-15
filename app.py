@@ -44,18 +44,16 @@ def extract_text_from_pdf(file_name):
         return f"❌ PDF 읽기 오류: {e}"
     return text
 
-# --- [완벽 수정] 조항 추출 함수 (목차 완전 배제 및 본문 타겟팅) ---
+# --- 조항 추출 함수 (다음 '장' 인식 및 페이지 번호 삭제 적용 유지) ---
 def get_clause_text(pdf_text, clause_name):
     if not clause_name:
         return "조항 번호가 명확하지 않아 부분 추출이 어렵습니다. 하단에서 전체 본문을 확인해 주세요."
         
-    # '제4조' 등에서 숫자만 추출
     num_match = re.search(r'\d+', clause_name)
     if not num_match:
         return f"💡 '{clause_name}'에서 조항 번호를 식별할 수 없습니다."
         
     num = num_match.group()
-    # 제4조, 제 4 조 등 띄어쓰기 변수 완벽 대응
     pattern = rf"제\s*{num}\s*조"
     matches = list(re.finditer(pattern, pdf_text))
     
@@ -69,15 +67,12 @@ def get_clause_text(pdf_text, clause_name):
         snippet = pdf_text[idx:min(len(pdf_text), idx + 300)]
         is_toc = False
         
-        # 1. 문서 초반(3000자 이내)에 위치한 첫 번째 매칭은 99.9% 확률로 목차이므로 강제 패스
         if i == 0 and len(matches) > 1 and idx < 3000:
             is_toc = True
             
-        # 2. 목차 특유의 점선 패턴 필터링 (. . . . . 형태로 띄어쓰기가 섞여 있어도 잡아냄)
         if re.search(r'(\.(?:\s*\.){3,})', snippet) or re.search(r'([·․…─\-_](?:\s*[·․…─\-_]){3,})', snippet):
             is_toc = True
             
-        # 3. 조항 제목 바로 뒤에 긴 공백과 페이지 번호가 단독으로 나오는 패턴 필터링
         first_line = snippet.split('\n')[0]
         if re.search(r'\s{4,}\d+\s*$', first_line):
             is_toc = True
@@ -85,34 +80,32 @@ def get_clause_text(pdf_text, clause_name):
         if is_toc:
             continue
             
-        # 모든 목차 패턴의 함정을 피했다면, 이곳이 진짜 본문!
         start_idx = idx
         break
         
-    # 만약 예외 상황으로 모든 매칭이 목차로 판정되었다면, 안전하게 두 번째 매칭을 본문으로 강제 지정
     if start_idx == -1:
         start_idx = matches[1].start() if len(matches) > 1 else matches[0].start()
         
-    # 다음 조항(본문의 끝) 찾기
     current_num = int(num)
-    end_idx = start_idx + 4000 # 내용이 길 경우를 대비해 넉넉하게 4000자로 기본 설정
+    search_area = pdf_text[start_idx + 10:]
     
-    # 다음 번호(제5조 또는 제6조) 찾기
-    next_pattern = rf"\n\s*제\s*({current_num + 1}|{current_num + 2})\s*조"
-    next_matches = list(re.finditer(next_pattern, pdf_text[start_idx + 10:]))
+    next_clause_pattern = rf"\n\s*제\s*({current_num + 1}|{current_num + 2})\s*조"
+    next_clause_matches = list(re.finditer(next_clause_pattern, search_area))
+    next_clause_idx = next_clause_matches[0].start() if next_clause_matches else 4000
     
-    for nm in next_matches:
-        n_idx = start_idx + 10 + nm.start()
-        n_snippet = pdf_text[n_idx:min(len(pdf_text), n_idx + 300)]
-        
-        # 발견한 '다음 조항'이 목차나 참조 문구가 아닌지 한번 더 안전망 체크
-        if re.search(r'(\.(?:\s*\.){3,})', n_snippet):
-            continue
-        
-        end_idx = n_idx
-        break
-        
-    return pdf_text[start_idx:end_idx].strip()
+    next_chapter_pattern = r"\n\s*\[?\s*제\s*\d+\s*장"
+    next_chapter_matches = list(re.finditer(next_chapter_pattern, search_area))
+    next_chapter_idx = next_chapter_matches[0].start() if next_chapter_matches else 4000
+    
+    cut_length = min(next_clause_idx, next_chapter_idx)
+    end_idx = start_idx + 10 + cut_length
+    
+    extracted_text = pdf_text[start_idx:end_idx].strip()
+    
+    extracted_text = re.sub(r'-\s*\d+\s*-', '', extracted_text)
+    extracted_text = re.sub(r'\n{3,}', '\n\n', extracted_text).strip()
+    
+    return extracted_text
 
 # --- 1. Simple(요약) 탭 데이터 로드 ---
 @st.cache_data(ttl=10)
@@ -156,7 +149,7 @@ def load_simple_data(sheet_name):
         st.error(f"'{sheet_name}' 에러: {e}")
         return pd.DataFrame()
 
-# --- 2. 상세(신구조문) 탭 데이터 로드 ---
+# --- 2. 상세(신구조문) 탭 데이터 로드 (중복 제거 로직 추가) ---
 @st.cache_data(ttl=10)
 def load_detail_data_by_gid(gid):
     try:
@@ -195,7 +188,12 @@ def load_detail_data_by_gid(gid):
                         '개정 사유': reason_text
                     })
         
-        return pd.DataFrame(records)
+        # [핵심 수정 사항] 수집된 데이터 중 완전히 동일한 중복 행(예: 4조가 2번 들어간 경우)을 1개로 압축합니다.
+        df_ret = pd.DataFrame(records)
+        if not df_ret.empty:
+            df_ret = df_ret.drop_duplicates().reset_index(drop=True)
+            
+        return df_ret
     except Exception as e:
         st.error(f"상세 데이터를 가져오는 중 에러가 발생했습니다: {e}")
         return pd.DataFrame()
@@ -276,7 +274,9 @@ def render_detail_tab(df):
     
     for y in years_to_show:
         st.markdown(f"### ⚖️ {y}년 신구조문 대비표")
-        y_df = df[df['연도'] == y].reset_index(drop=True)
+        
+        # 여기서도 이중 안전장치로 출력 전 한 번 더 중복을 제거합니다.
+        y_df = df[df['연도'] == y].drop_duplicates().reset_index(drop=True)
         
         matched_year_key = next((k for k in FILE_MAP.keys() if k in y), None)
         pdf_text = ""
@@ -302,7 +302,6 @@ def render_detail_tab(df):
             expander_title = f"🔍 {clause_name} 원문 대조하기" if clause_name else "🔍 관련 원문 대조하기"
             with st.expander(expander_title):
                 if matched_year_key and pdf_text:
-                    # 완벽하게 고도화된 본문 매칭 함수 적용
                     target_clause_text = get_clause_text(pdf_text, clause_name)
                     st.text_area(
                         label="PDF 원문 발췌", 
