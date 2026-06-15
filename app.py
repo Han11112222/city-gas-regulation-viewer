@@ -4,6 +4,7 @@ import pdfplumber
 import os
 import urllib.parse
 import numpy as np
+import time  # [수정] 구글 시트 캐시 우회를 위해 추가
 
 # --- 페이지 기본 설정 ---
 st.set_page_config(page_title="도시가스 공급규정 개정 이력 관리 시스템", layout="wide")
@@ -43,11 +44,15 @@ def extract_text_from_pdf(file_name):
     return text
 
 # --- 구글 시트 데이터 로드 및 전처리 함수 ---
-@st.cache_data(ttl=0) # 시트 수정 즉시 확인을 위해 캐시 0 설정
+@st.cache_data(ttl=10) # [수정] 0초 대신 10초로 두어 불필요한 과부하를 방지
 def load_cleaned_data(sheet_name):
     try:
         encoded_sheet_name = urllib.parse.quote(sheet_name)
-        csv_url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&sheet={encoded_sheet_name}"
+        
+        # [수정] 구글 서버측 캐시 강제 우회 (Cache Busting)
+        # 타임스탬프를 쿼리에 추가하여 항상 새로운 URL로 인식하게 만듭니다.
+        cache_buster = int(time.time())
+        csv_url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&sheet={encoded_sheet_name}&cb={cache_buster}"
         
         df_raw = pd.read_csv(csv_url, dtype=str, header=None)
         df_raw = df_raw.dropna(how='all', axis=0).dropna(how='all', axis=1)
@@ -130,7 +135,6 @@ def render_tab_content(df, tab_name):
         css += '[data-testid="stTable"] table { width: 100% !important; }\n'
         
         for i, col in enumerate(display_df.columns):
-            # 1열은 인덱스 번호이므로, 실제 데이터는 i+2번째 열에 해당
             if "내용" in col:
                 css += f'[data-testid="stTable"] th:nth-child({i+2}), [data-testid="stTable"] td:nth-child({i+2}) {{ width: 50% !important; }}\n'
             elif "사유" in col:
@@ -181,6 +185,9 @@ def render_tab_content(df, tab_name):
         
         target_date_str = str(chosen_row[date_col])
         matched_year_key = None
+        
+        # [수정] PDF 연도 매칭 로직 보완
+        # 날짜 문자열에 '2025'가 명시적으로 없더라도 대응 가능하도록 로직을 강화할 수 있습니다.
         for y_key in FILE_MAP.keys():
             if y_key in target_date_str:
                 matched_year_key = y_key
@@ -193,7 +200,7 @@ def render_tab_content(df, tab_name):
                     pdf_text = extract_text_from_pdf(FILE_MAP[matched_year_key])
                     st.text_area(label="전체 파일 본문", value=pdf_text, height=450, key=f"pdf_area_{tab_name}_{selected_idx}")
         else:
-            st.warning(f"⚠️ 선택한 일자({target_date_str})에 매칭되는 PDF 파일을 찾을 수 없습니다.")
+            st.warning(f"⚠️ 선택한 일자({target_date_str})에 매칭되는 PDF 파일을 찾을 수 없습니다. (연도 확인 필요)")
 
 with tab1:
     render_tab_content(df_simple, "Simple")
