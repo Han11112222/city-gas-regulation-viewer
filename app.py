@@ -85,7 +85,7 @@ def load_simple_data(sheet_name):
         st.error(f"'{sheet_name}' 에러: {e}")
         return pd.DataFrame()
 
-# --- 2. 상세(신구조문) 탭 전용 데이터 로드 함수 (GID 지정 및 4열 파싱) ---
+# --- 2. 상세(신구조문) 탭 전용 데이터 로드 함수 ---
 @st.cache_data(ttl=10)
 def load_detail_data_by_gid(gid):
     try:
@@ -136,7 +136,7 @@ df_detail = load_detail_data_by_gid("1205780686")
 # --- 화면 탭 구성 ---
 tab1, tab2 = st.tabs(["📑 요약 버전 (Simple)", "📄 상세 버전 (신구조문 대비표)"])
 
-# --- [이전 그대로 유지] 1. Simple 탭 렌더링 함수 ---
+# --- 1. 요약 버전 (Simple) 탭 렌더링 함수 ---
 def render_simple_tab(df, tab_name="Simple"):
     if df.empty:
         st.info("시트에 데이터가 없거나 로드되지 않았습니다.")
@@ -145,7 +145,21 @@ def render_simple_tab(df, tab_name="Simple"):
     date_col = df.columns[0] 
     df[date_col] = df[date_col].astype(str).str.strip()
     
-    unique_dates = sorted([d for d in df[date_col].unique() if d and d != "nan" and not d.startswith("공란_")], reverse=True)
+    # -----------------------------------------------------------------
+    # [수정 반영] UI 스타일은 유지하되, 데이터 정렬 및 필터 적용
+    # -----------------------------------------------------------------
+    # 연도 추출 후 2016년~현재 데이터만 필터링
+    df['_year'] = df[date_col].str.extract(r'^(\d{4})').astype(float)
+    df = df[df['_year'] >= 2016].copy()
+    
+    # 날짜 정렬용 임시 컬럼 생성 후 최신순(내림차순) 정렬
+    df['_date_sort'] = pd.to_datetime(df[date_col].str.replace(r'\.$', '', regex=True), format='mixed', errors='coerce')
+    df = df.sort_values(by=['_date_sort', date_col], ascending=[False, False])
+    df = df.drop(columns=['_year', '_date_sort'])
+    # -----------------------------------------------------------------
+    
+    # 정렬된 순서대로 드롭다운 메뉴 구성
+    unique_dates = [d for d in df[date_col].unique() if d and d != "nan" and not d.startswith("공란_")]
 
     selected_date = st.selectbox(
         f"📅 조회할 {date_col if not date_col.startswith('공란_') else '일자'} 선택 ({tab_name})", 
@@ -167,7 +181,7 @@ def render_simple_tab(df, tab_name="Simple"):
         display_df = display_df[valid_display_cols]
         display_df.index = range(1, len(display_df) + 1)
         
-        # --- 원본 CSS 레이아웃 유지 ---
+        # --- 원본 레이아웃 폭 규격 CSS 유지 ---
         css = "<style>\n"
         css += '[data-testid="stTable"] table { width: 100% !important; }\n'
         for i, col in enumerate(display_df.columns):
@@ -178,6 +192,7 @@ def render_simple_tab(df, tab_name="Simple"):
         css += "</style>"
         st.markdown(css, unsafe_allow_html=True)
         
+        # 원본 컴포넌트(st.table) 그대로 출력하여 깔끔한 글머리 기호 유지
         st.table(display_df)
     else:
         st.write("선택한 조건의 데이터가 없습니다.")
@@ -232,13 +247,13 @@ def render_simple_tab(df, tab_name="Simple"):
         else:
             st.warning(f"⚠️ 선택한 일자({target_date_str})에 매칭되는 PDF 파일을 찾을 수 없습니다.")
 
-# --- 2. 상세(신구조문) 탭 렌더링 함수 (3단 레이아웃 고도화) ---
+# --- 2. 상세 버전 (신구조문 대비표) 탭 렌더링 함수 ---
 def render_detail_tab(df):
     if df.empty:
         st.info("상세 탭 데이터가 없습니다.")
         return
         
-    unique_years = sorted([y for y in df['연도'].unique() if y != "알 수 없음"], reverse=True)
+    unique_years = sorted([y for y in df['연度'].unique() if y != "알 수 없음"] if '연度' in df.columns else [y for y in df['연도'].unique() if y != "알 수 없음"], reverse=True)
     selected_year = st.selectbox("📅 신구조문을 비교할 연도 선택", ["전체 보기"] + unique_years, key="select_detail_year")
     
     years_to_show = unique_years if selected_year == "전체 보기" else [selected_year]
