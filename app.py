@@ -43,12 +43,13 @@ def extract_text_from_pdf(file_name):
         return f"❌ PDF 읽기 오류: {e}"
     return text
 
-# --- [수정] Simple(요약) 탭 데이터 로드 함수 ---
+# --- 1. Simple(요약) 탭 데이터 로드 ---
 @st.cache_data(ttl=10)
 def load_simple_data(sheet_name):
     try:
         encoded_sheet_name = urllib.parse.quote(sheet_name)
         cache_buster = int(time.time())
+        # Simple 시트는 기존처럼 이름으로 호출
         csv_url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&sheet={encoded_sheet_name}&cb={cache_buster}"
         
         df_raw = pd.read_csv(csv_url, dtype=str, header=None)
@@ -85,13 +86,13 @@ def load_simple_data(sheet_name):
         st.error(f"'{sheet_name}' 에러: {e}")
         return pd.DataFrame()
 
-# --- [신규] 상세(신구조문) 탭 전용 데이터 로드 함수 ---
+# --- 2. [수정] 상세(신구조문) 탭 전용 데이터 로드 (GID 사용) ---
 @st.cache_data(ttl=10)
-def load_detail_data(sheet_name):
+def load_detail_data_by_gid(gid):
     try:
-        encoded_sheet_name = urllib.parse.quote(sheet_name)
         cache_buster = int(time.time())
-        csv_url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&sheet={encoded_sheet_name}&cb={cache_buster}"
+        # 한글 이름 오류를 방지하기 위해 형님께서 주신 시트의 고유 ID(gid=1205780686)를 직접 타겟팅
+        csv_url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={gid}&cb={cache_buster}"
         
         df_raw = pd.read_csv(csv_url, dtype=str, header=None)
         
@@ -102,24 +103,23 @@ def load_detail_data(sheet_name):
             vals = [str(x).strip() if str(x).strip() != 'nan' else '' for x in row.tolist()]
             if all(v == '' for v in vals): continue
                 
-            # 1. 4자리 숫자가 있으면 연도로 인식하고 업데이트
+            # 1. 4자리 숫자가 있으면 연도로 인식
             found_year = False
-            for v in vals[:3]:
+            for v in vals:
                 if v.isdigit() and len(v) == 4:
                     current_year = v
                     found_year = True
                     break
             if found_year: continue
                 
-            # 2. '현행', '개정(안)' 헤더 텍스트가 있는 행은 스킵
+            # 2. 헤더 행 스킵
             if '현행' in vals or '개정(안)' in vals: continue
                 
-            # 3. 데이터 행 처리 (구글 시트상 인덱스 1(B열)이 현행, 2(C열)가 개정안)
+            # 3. 데이터 추출 (인덱스 1: 현행, 인덱스 2: 개정안)
             if len(vals) >= 3:
                 current_text = vals[1]
                 revised_text = vals[2]
                 
-                # 둘 중 하나라도 내용이 있으면 리스트에 추가
                 if current_text or revised_text:
                     records.append({
                         '연도': current_year,
@@ -134,12 +134,13 @@ def load_detail_data(sheet_name):
 
 # --- 데이터 가져오기 ---
 df_simple = load_simple_data("simple")
-df_detail = load_detail_data("상세")
+# '상세' 시트의 고유 GID인 1205780686을 직접 입력하여 혼선을 원천 차단
+df_detail = load_detail_data_by_gid("1205780686")
 
 # --- 화면 탭 구성 ---
 tab1, tab2 = st.tabs(["📑 요약 버전 (Simple)", "📄 상세 버전 (신구조문 대비표)"])
 
-# --- 1. Simple 탭 렌더링 함수 ---
+# --- Simple 탭 렌더링 함수 ---
 def render_simple_tab(df):
     if df.empty:
         st.info("Simple 데이터가 없습니다.")
@@ -148,7 +149,6 @@ def render_simple_tab(df):
     date_col = df.columns[0] 
     df[date_col] = df[date_col].astype(str).str.strip()
     
-    # 2016년 이후 데이터 필터링 및 내림차순 정렬
     df['_year'] = df[date_col].str.extract(r'^(\d{4})').astype(float)
     df = df[df['_year'] >= 2016].copy()
     df['_date_sort'] = pd.to_datetime(df[date_col].str.replace(r'\.$', '', regex=True), format='mixed', errors='coerce')
@@ -172,8 +172,6 @@ def render_simple_tab(df):
         display_df = filtered_df.copy()
         valid_display_cols = [col for col in display_df.columns if not col.startswith("공란_")]
         display_df = display_df[valid_display_cols]
-        
-        # [수정포인트 1] st.dataframe 사용 -> 글자가 두 줄로 안 깨지고 한 줄로 넓게 표시 (가로 스크롤 자동 생성)
         st.dataframe(display_df, use_container_width=True, hide_index=True)
     else:
         st.write("선택한 조건의 데이터가 없습니다.")
@@ -199,48 +197,44 @@ def render_simple_tab(df):
                 st.markdown(f"**📍 {col_name}**")
                 st.info(str(chosen_row[col_name]))
 
-# --- 2. 상세(신구조문) 탭 렌더링 함수 ---
+# --- 상세(신구조문) 탭 렌더링 함수 ---
 def render_detail_tab(df):
     if df.empty:
-        st.info("상세 탭 데이터가 없습니다.")
+        st.info("상세 탭 데이터가 없습니다. (데이터 로드 중이거나 시트가 비어있습니다.)")
         return
         
-    # 연도 기준 내림차순 정렬 (2025년이 먼저 보이도록)
-    unique_years = sorted(df['연도'].unique(), reverse=True)
-    selected_year = st.selectbox("📅 신구조문을 비교할 연도 선택", unique_years, key="select_detail_year")
+    # [수정포인트] 최신 연도가 가장 위로 오도록 정렬 (예: 2025 -> 2024 -> ...)
+    unique_years = sorted([y for y in df['연도'].unique() if y != "알 수 없음"], reverse=True)
     
-    filtered_df = df[df['연도'] == selected_year].reset_index(drop=True)
+    selected_year = st.selectbox("📅 신구조문을 비교할 연도 선택", ["전체 보기"] + unique_years, key="select_detail_year")
     
-    st.markdown(f"### ⚖️ {selected_year}년 신구조문 대비표")
-    st.caption("해당 연도의 개정안과 직전 연도의 현행 규정을 좌우로 비교합니다.")
+    # '전체 보기'면 모든 연도를 순서대로 보여주고, 특정 연도면 해당 연도만 필터링
+    years_to_show = unique_years if selected_year == "전체 보기" else [selected_year]
     
-    # [수정포인트 2] 구글 시트 데이터를 기반으로 완벽한 좌우 비교 UI 생성
-    for idx, row in filtered_df.iterrows():
-        with st.container():
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown("##### ⬅️ 현행")
-                st.info(row['현행'] if row['현행'] else "(내용 없음)")
-            with col2:
-                st.markdown("##### ➡️ 개정(안)")
-                st.success(row['개정(안)'] if row['개정(안)'] else "(내용 없음)")
-        st.markdown("<hr style='margin: 10px 0;'>", unsafe_allow_html=True)
+    for y in years_to_show:
+        st.markdown(f"### ⚖️ {y}년 신구조문 대비표")
         
-    st.markdown("<br>", unsafe_allow_html=True)
-    
-    # 선택된 연도와 매칭되는 PDF 하단에 표시
-    matched_year_key = None
-    for y_key in FILE_MAP.keys():
-        if y_key in selected_year:
-            matched_year_key = y_key
-            break
+        y_df = df[df['연도'] == y].reset_index(drop=True)
+        
+        for idx, row in y_df.iterrows():
+            with st.container():
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.markdown("##### ⬅️ 현행")
+                    st.info(row['현행'] if row['현행'] else "(내용 없음)")
+                with col2:
+                    st.markdown("##### ➡️ 개정(안)")
+                    st.success(row['개정(안)'] if row['개정(안)'] else "(내용 없음)")
+            st.markdown("<hr style='margin: 10px 0;'>", unsafe_allow_html=True)
             
-    if matched_year_key:
-        st.markdown(f"### 📄 {matched_year_key}년 공급규정 원문")
-        with st.expander(f"🔍 {FILE_MAP[matched_year_key]} 텍스트 확인하기", expanded=False):
-            with st.spinner("PDF 문서 읽어오는 중..."):
+        st.markdown("<br>", unsafe_allow_html=True)
+        
+        # 선택된 연도와 매칭되는 PDF 원문 토글 (전체 보기일 때는 생략 가능하지만, 일단 유지)
+        matched_year_key = next((k for k in FILE_MAP.keys() if k in y), None)
+        if matched_year_key:
+            with st.expander(f"🔍 {FILE_MAP[matched_year_key]} 원문 텍스트 확인하기", expanded=False):
                 pdf_text = extract_text_from_pdf(FILE_MAP[matched_year_key])
-                st.text_area(label="전체 파일 본문", value=pdf_text, height=300, key=f"pdf_area_detail_{selected_year}")
+                st.text_area(label=f"{y}년 원문", value=pdf_text, height=300, key=f"pdf_area_detail_{y}")
 
 # --- 탭 실행 ---
 with tab1:
