@@ -44,7 +44,7 @@ def extract_text_from_pdf(file_name):
         return f"❌ PDF 읽기 오류: {e}"
     return text
 
-# --- [고도화] 조항(예: 제4조) 추출 함수 (목차 회피) ---
+# --- [수정된 부분] 조항(예: 제4조) 추출 함수 (줄바꿈 무시 목차 완벽 회피) ---
 def get_clause_text(pdf_text, clause_name):
     if not clause_name:
         return "조항 번호가 명확하지 않아 부분 추출이 어렵습니다. 하단에서 전체 본문을 확인해 주세요."
@@ -57,25 +57,22 @@ def get_clause_text(pdf_text, clause_name):
         
     start_idx = -1
     
-    # 매칭된 텍스트 중 목차(점선이나 끝에 숫자가 있는 줄)를 건너뛰고 실제 본문을 탐색
     for match in matches:
-        line_start = pdf_text.rfind('\n', 0, match.start())
-        line_end = pdf_text.find('\n', match.end())
-        if line_start == -1: line_start = 0
-        if line_end == -1: line_end = match.end() + 50
+        # 매칭 지점부터 넉넉히 200글자를 가져옵니다. (줄바꿈이 섞여 있어도 감지 가능)
+        snippet = pdf_text[match.start():min(len(pdf_text), match.start() + 200)]
         
-        line_text = pdf_text[line_start:line_end]
-        
-        # 목차의 전형적인 특징 방어: 점(.) 3개 이상 연속 또는 맨 끝에 페이지 번호 단독 존재
-        if re.search(r'\.{3,}', line_text) or re.search(r'[\.\s]+\d+\s*$', line_text):
+        # 목차의 특징: 점(.), 가운뎃점(·), 기호(․) 등이 3개 이상 연속되거나
+        # '페이지 번호'를 암시하는 패턴이 바로 이어지면 목차로 간주하고 패스
+        if re.search(r'[\.·․]{3,}', snippet) or re.search(r'\b\d+\s*\n\s*\[?제\d+장', snippet):
             continue
             
+        # 목차가 아니라고 판단되면 이곳을 본문의 시작점으로 확정
         start_idx = match.start()
         break
         
-    # 만약 본문을 찾지 못했다면(전부 목차로 걸러졌다면) 가장 마지막 매칭 지점을 사용
+    # 만약 모두 목차로 걸러졌다면, 안전하게 두 번째 매칭 지점(보통 진짜 본문)을 사용합니다.
     if start_idx == -1:
-        start_idx = matches[-1].start()
+        start_idx = matches[1].start() if len(matches) > 1 else matches[0].start()
         
     num_match = re.search(r'\d+', clause_name)
     if num_match:
@@ -183,7 +180,7 @@ df_detail = load_detail_data_by_gid("1205780686")
 # --- 화면 탭 구성 ---
 tab1, tab2 = st.tabs(["📑 요약 버전 (Simple)", "📄 상세 버전 (신구조문 대비표)"])
 
-# --- 1. [완전 개편] 요약 버전 (Simple) 탭 렌더링 ---
+# --- 1. 요약 버전 (Simple) 탭 렌더링 (이전 유지) ---
 def render_simple_tab(df, tab_name="Simple"):
     if df.empty:
         st.info("시트에 데이터가 없거나 로드되지 않았습니다.")
@@ -192,7 +189,6 @@ def render_simple_tab(df, tab_name="Simple"):
     date_col = df.columns[0] 
     df[date_col] = df[date_col].astype(str).str.strip()
     
-    # 2016년 이후 데이터만 필터링 후 최신순 정렬
     df['_year'] = df[date_col].str.extract(r'^(\d{4})').astype(float)
     df = df[df['_year'] >= 2016].copy()
     
@@ -202,7 +198,6 @@ def render_simple_tab(df, tab_name="Simple"):
     
     st.markdown(f"### 🔍 항목별 상세 내용 및 원문 대조")
     
-    # 리스트 박스 옵션 생성 (연도 + 개정 내용 요약)
     row_options = []
     for idx, row in df.iterrows():
         hint = f"[{row[date_col]}] "
@@ -211,7 +206,6 @@ def render_simple_tab(df, tab_name="Simple"):
         hint += f"{str(row[second_col])[:45]}..."
         row_options.append((idx, hint))
         
-    # 상단에 단일 셀렉트박스 배치 (최신 항목이 기본값으로 선택됨)
     selected_idx = st.selectbox(
         "자세히 볼 항목을 선택하세요:",
         options=[opt[0] for opt in row_options],
@@ -223,7 +217,6 @@ def render_simple_tab(df, tab_name="Simple"):
     valid_cols = [c for c in df.columns if not c.startswith("공란_")]
     num_valid_cols = len(valid_cols)
     
-    # [현행 표 삭제 완료] 선택한 데이터의 3열(일자, 주요 개정 내용, 변경 사유)만 즉시 표시
     if num_valid_cols > 0:
         cols = st.columns(num_valid_cols)
         for i, col_name in enumerate(valid_cols):
@@ -238,13 +231,12 @@ def render_simple_tab(df, tab_name="Simple"):
     
     if matched_year_key:
         st.markdown(f"### 📄 {matched_year_key}년 공급규정 전문")
-        # 공간 확보를 위해 요약 탭의 원문 뷰어는 기본적으로 닫힌 상태(expanded=False)로 세팅
         with st.expander(f"🔍 {FILE_MAP[matched_year_key]} 원문 텍스트 펼치기", expanded=False):
             with st.spinner("PDF 문서 읽어오는 중..."):
                 pdf_text = extract_text_from_pdf(FILE_MAP[matched_year_key])
                 st.text_area(label="전체 파일 본문", value=pdf_text, height=450, key=f"pdf_area_{tab_name}_{selected_idx}")
 
-# --- 2. 상세 버전 탭 렌더링 ---
+# --- 2. 상세 버전 탭 렌더링 (이전 유지) ---
 def render_detail_tab(df):
     if df.empty:
         st.info("상세 탭 데이터가 없습니다.")
@@ -283,7 +275,6 @@ def render_detail_tab(df):
             expander_title = f"🔍 {clause_name} 원문 대조하기" if clause_name else "🔍 관련 원문 대조하기"
             with st.expander(expander_title):
                 if matched_year_key and pdf_text:
-                    # 향상된 본문 매칭 함수 적용
                     target_clause_text = get_clause_text(pdf_text, clause_name)
                     st.text_area(
                         label="PDF 원문 발췌", 
