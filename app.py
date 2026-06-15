@@ -44,7 +44,7 @@ def extract_text_from_pdf(file_name):
         return f"❌ PDF 읽기 오류: {e}"
     return text
 
-# --- 조항 추출 함수 (다음 '장' 인식 및 페이지 번호 삭제 적용 유지) ---
+# --- 조항 추출 함수 (다음 '장' 인식 및 페이지 번호 삭제 적용) ---
 def get_clause_text(pdf_text, clause_name):
     if not clause_name:
         return "조항 번호가 명확하지 않아 부분 추출이 어렵습니다. 하단에서 전체 본문을 확인해 주세요."
@@ -107,45 +107,64 @@ def get_clause_text(pdf_text, clause_name):
     
     return extracted_text
 
-# --- [신규] 현행과 개정안을 비교하여 추가/변경된 부분만 붉은색으로 칠하는 함수 ---
+# --- [완벽 수정] 현행과 개정안을 비교하여 추가/변경된 부분만 붉은색 하이라이트 ---
 def highlight_differences(pdf_text, current_text, revised_text):
     if not pdf_text:
         return pdf_text
         
-    # 현행과 개정안을 줄바꿈 단위로 쪼갬
-    curr_lines = [l.strip() for l in str(current_text).split('\n') if l.strip()]
-    rev_lines = [l.strip() for l in str(revised_text).split('\n') if l.strip()]
+    curr_str = str(current_text)
+    rev_str = str(revised_text)
+    
+    # 1. 사람이 스프레드시트에 작성한 메모용 구분자들을 기준으로 문장을 분리합니다.
+    split_pattern = r'생략|\(신설\)|\(변경\)|\(삭제\)|\n'
+    rev_parts = re.split(split_pattern, rev_str)
     
     targets = []
-    for r_line in rev_lines:
-        # 1. 현행에 완전히 똑같이 있는 문구는 하이라이트에서 제외
-        if any(r_line == c_line for c_line in curr_lines):
-            continue
-            
-        # 2. '(신설)', '(변경)', '(생략)' 등 식별용 꼬리표 텍스트만 지워서 순수 문장 확보
-        clean_r = re.sub(r'\((신설|변경|생략)\)', '', r_line).strip()
+    c_clean_for_match = re.sub(r'\s+', '', curr_str) # 현행과 비교할 때 공백을 무시하여 정확도 상승
+    
+    for part in rev_parts:
+        # "1~21" 또는 "①~⑦" 같은 조항 범위 생략 메모 지우기
+        p_clean = re.sub(r'[①-⑳\d]+\s*~\s*[①-⑳\d]+', '', part)
+        # "제4조(용어의 정의)" 등 앞부분 조항 제목 지우기
+        p_clean = re.sub(r'제\s*\d+\s*조\s*\([^)]*\)', '', p_clean)
+        # 문자열 앞에 남은 쓸데없는 괄호나 기호들 정리
+        p_clean = re.sub(r'^[)\],.\s]+', '', p_clean).strip()
         
-        # 3. 너무 짧은 문자열은 오류 방지를 위해 패스
-        if len(clean_r) < 5: 
+        # 의미 없는 짧은 조각들은 패스
+        if len(p_clean) < 5:
             continue
             
-        targets.append(clean_r)
+        # 2. 현행(기존 규정)에 이 문장이 그대로 존재한다면, 개정된 게 아니므로 패스!
+        p_clean_no_space = re.sub(r'\s+', '', p_clean)
+        if p_clean_no_space in c_clean_for_match:
+            continue
+            
+        # 필터를 통과한 '진짜 개정된 문장'만 타겟으로 저장
+        targets.append(p_clean)
         
     highlighted = pdf_text
     for t in targets:
-        # PDF에서 발생할 수 있는 띄어쓰기 꼬임이나 무작위 줄바꿈을 완벽 대처하기 위해 정규식 패턴화
-        pattern = r'\s+'.join(re.escape(w) for w in t.split())
-        if pattern:
-            try:
-                # 일치하는 타겟 텍스트를 진한 빨간색 + 약간의 배경색으로 감싸서 출력
-                highlighted = re.sub(
-                    f'({pattern})', 
-                    r'<span style="color: #d32f2f; font-weight: bold; background-color: #ffebee;">\1</span>', 
-                    highlighted
-                )
-            except:
-                pass
-                
+        words = t.split()
+        escaped_words = []
+        for w in words:
+            ew = re.escape(w)
+            # 스프레드시트의 따옴표(“)와 PDF의 따옴표(")가 달라도 무조건 매칭되도록 처리
+            ew = re.sub(r'[\'\"“”‘’]', r'[\'\"“”‘’]', ew)
+            escaped_words.append(ew)
+        
+        # 단어 사이사이에 어떤 길이의 띄어쓰기나 줄바꿈이 있어도 포용하도록 \s* 강력 적용
+        pattern = r'\s*'.join(escaped_words)
+        
+        try:
+            # 매칭된 본문을 붉은색 글자와 연한 배경색 태그로 감싸기
+            highlighted = re.sub(
+                f'({pattern})', 
+                r'<span style="color: #d32f2f; font-weight: bold; background-color: #ffebee;">\1</span>', 
+                highlighted
+            )
+        except Exception as e:
+            pass
+            
     return highlighted
 
 # --- 1. Simple(요약) 탭 데이터 로드 ---
@@ -245,7 +264,7 @@ df_detail = load_detail_data_by_gid("1205780686")
 # --- 화면 탭 구성 ---
 tab1, tab2 = st.tabs(["📑 요약 버전 (Simple)", "📄 상세 버전 (신구조문 대비표)"])
 
-# --- 1. 요약 버전 (Simple) 탭 렌더링 (절대 수정 금지 구역) ---
+# --- 1. 요약 버전 (Simple) 탭 렌더링 ---
 def render_simple_tab(df, tab_name="Simple"):
     if df.empty:
         st.info("시트에 데이터가 없거나 로드되지 않았습니다.")
@@ -301,7 +320,7 @@ def render_simple_tab(df, tab_name="Simple"):
                 pdf_text = extract_text_from_pdf(FILE_MAP[matched_year_key])
                 st.text_area(label="전체 파일 본문", value=pdf_text, height=450, key=f"pdf_area_{tab_name}_{selected_idx}")
 
-# --- 2. 상세 버전 탭 렌더링 (붉은색 하이라이트 적용) ---
+# --- 2. 상세 버전 탭 렌더링 ---
 def render_detail_tab(df):
     if df.empty:
         st.info("상세 탭 데이터가 없습니다.")
@@ -341,13 +360,13 @@ def render_detail_tab(df):
             expander_title = f"🔍 {clause_name} 원문 대조하기" if clause_name else "🔍 관련 원문 대조하기"
             with st.expander(expander_title):
                 if matched_year_key and pdf_text:
-                    # 1. 텍스트 추출
+                    # 1. 대상 조항 원문 가져오기
                     target_clause_text = get_clause_text(pdf_text, clause_name)
                     
-                    # 2. 신규/변경 텍스트 하이라이트(붉은색 렌더링) 처리
+                    # 2. 개정안에 추가/변경된 부분만 붉은색으로 칠하기
                     highlighted_clause_text = highlight_differences(target_clause_text, row['현행'], row['개정(안)'])
                     
-                    # 3. st.text_area 대신 스타일링된 HTML div 박스(st.markdown)를 사용하여 시각적 효과 구현
+                    # 3. HTML 마크다운을 통해 색상 서식 적용 렌더링
                     st.markdown(f"**PDF 원문 발췌**")
                     st.markdown(
                         f"""
