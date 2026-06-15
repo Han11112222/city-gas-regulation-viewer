@@ -44,7 +44,7 @@ def extract_text_from_pdf(file_name):
         return f"❌ PDF 읽기 오류: {e}"
     return text
 
-# --- 조항 추출 함수 (본문 추출 및 페이지 번호/빈 줄 압축) ---
+# --- 조항 추출 함수 (별표 무시 및 줄간격 완벽 통일) ---
 def get_clause_text(pdf_text, clause_name):
     if not clause_name:
         return "조항 번호가 명확하지 않아 부분 추출이 어렵습니다. 하단에서 전체 본문을 확인해 주세요."
@@ -54,7 +54,8 @@ def get_clause_text(pdf_text, clause_name):
         return f"💡 '{clause_name}'에서 조항 번호를 식별할 수 없습니다."
         
     num = num_match.group()
-    pattern = rf"제\s*{num}\s*조"
+    # [수정] 제17조의2 등을 잘못 잡지 않도록 정규식 강화
+    pattern = rf"제\s*{num}\s*조(?!\s*의)"
     matches = list(re.finditer(pattern, pdf_text))
     
     if not matches:
@@ -75,6 +76,10 @@ def get_clause_text(pdf_text, clause_name):
             
         first_line = snippet.split('\n')[0]
         if re.search(r'\s{4,}\d+\s*$', first_line):
+            is_toc = True
+            
+        # [핵심 수정] 제17조 뒤에 '별표'가 나오는 경우 본문이 아니므로 무조건 건너뜀
+        if re.match(rf"제\s*{num}\s*조\s*별표", snippet):
             is_toc = True
             
         if is_toc:
@@ -102,9 +107,9 @@ def get_clause_text(pdf_text, clause_name):
     
     extracted_text = pdf_text[start_idx:end_idx].strip()
     
+    # [핵심 수정] 페이지 번호 제거 및 모든 다중 줄바꿈을 1줄로 완전히 압축 (들쭉날쭉한 간격 해결)
     extracted_text = re.sub(r'-\s*\d+\s*-', '', extracted_text)
-    extracted_text = re.sub(r'[ \t]+\n', '\n', extracted_text)
-    extracted_text = re.sub(r'\n{2,}', '\n', extracted_text).strip()
+    extracted_text = re.sub(r'\n+', '\n', extracted_text).strip()
     
     return extracted_text
 
@@ -115,7 +120,6 @@ def highlight_differences(pdf_text, current_text, revised_text):
     curr_str = str(current_text)
     rev_str = str(revised_text)
 
-    # 개정안 텍스트에서 (신설), (변경) 등의 꼬리표를 분리하여 함께 추출
     parts = re.split(r'(\(신설\)|\(변경\)|\(삭제\))', rev_str)
 
     targets = []
@@ -128,33 +132,31 @@ def highlight_differences(pdf_text, current_text, revised_text):
             text = current_text_buffer
             current_text_buffer = "" 
             
-            p_clean = re.sub(r'\((생략)\)', '', text)
-            p_clean = re.sub(r'[①-⑳\d]+\s*~\s*[①-⑳\d]+', '', p_clean)
+            # [핵심 수정] '1~21 생략', '⑤~⑦ (생략)' 등 작성자 메모를 완벽하게 제거
+            p_clean = re.sub(r'([①-⑳\d]+\s*~\s*[①-⑳\d]+\s*)?\(?생략\)?', '', text)
             p_clean = re.sub(r'제\s*\d+\s*조\s*\([^)]*\)', '', p_clean)
             p_clean = re.sub(r'^[)\],.\s]+', '', p_clean).strip()
             
-            if len(p_clean) >= 5:
+            if len(p_clean) >= 2:
                 p_clean_no_space = re.sub(r'\s+', '', p_clean)
                 if p_clean_no_space not in c_clean_for_match:
                     p_clean_no_space = re.sub(r'[\'\"“”‘’]', '', p_clean_no_space)
-                    if len(p_clean_no_space) > 3:
+                    if len(p_clean_no_space) > 2:
                         targets.append((p_clean_no_space, tag))
         else:
             current_text_buffer += part
 
-    # 꼬리표가 없던 나머지 문장들도 처리
     if current_text_buffer:
         text = current_text_buffer
-        p_clean = re.sub(r'\((생략)\)', '', text)
-        p_clean = re.sub(r'[①-⑳\d]+\s*~\s*[①-⑳\d]+', '', p_clean)
+        p_clean = re.sub(r'([①-⑳\d]+\s*~\s*[①-⑳\d]+\s*)?\(?생략\)?', '', text)
         p_clean = re.sub(r'제\s*\d+\s*조\s*\([^)]*\)', '', p_clean)
         p_clean = re.sub(r'^[)\],.\s]+', '', p_clean).strip()
         
-        if len(p_clean) >= 5:
+        if len(p_clean) >= 2:
             p_clean_no_space = re.sub(r'\s+', '', p_clean)
             if p_clean_no_space not in c_clean_for_match:
                 p_clean_no_space = re.sub(r'[\'\"“”‘’]', '', p_clean_no_space)
-                if len(p_clean_no_space) > 3:
+                if len(p_clean_no_space) > 2:
                     targets.append((p_clean_no_space, ""))
 
     if not targets:
@@ -199,26 +201,18 @@ def highlight_differences(pdf_text, current_text, revised_text):
         part2 = highlighted_text[start:end+1]
         part3 = highlighted_text[end+1:]
         
-        # PDF 원문 하이라이트의 끝에 (신설), (변경) 등 태그를 붉은색으로 동적 추가
         tag_html = f' <span style="color: #d32f2f; font-weight: bold;">{tag}</span>' if tag else ''
         highlighted_text = part1 + f'<span style="color: #d32f2f; font-weight: bold; background-color: #ffebee;">{part2}</span>{tag_html}' + part3
 
     return highlighted_text
 
-# --- [신규] UI 텍스트 자동 줄바꿈 포맷팅 함수 (1줄 띄어쓰기) ---
+# --- UI 텍스트 자동 줄바꿈 포맷팅 함수 (1줄 띄어쓰기) ---
 def format_ui_text(text):
     if not text: return ""
     t = str(text)
-    
-    # 1. 띄어쓰기 후 동그라미 번호(①~⑳)가 오면 자동으로 마크다운 줄바꿈(\n\n) 처리 (단, ⑤~⑦ 처럼 범위 지정일 때는 제외)
     t = re.sub(r'(?<!\n)(?<!~)(?<!-)\s+([①-⑳])', r'\n\n\1', t)
-    
-    # 2. 띄어쓰기 후 '숫자. "단어"' 형태(예: 22. "검침"이란)가 오면 자동으로 줄바꿈 처리
     t = re.sub(r'(?<!\n)\s+(\d{1,2}\.\s*[“"”\'A-Za-z가-힣])', r'\n\n\1', t)
-    
-    # 3. 기존의 1칸짜리 줄바꿈(\n)을 2칸(\n\n)으로 변환하여 Streamlit 화면에서 단락이 나뉘게 보장
     t = re.sub(r'\n+', r'\n\n', t)
-    
     return t.strip()
 
 # --- 1. Simple(요약) 탭 데이터 로드 ---
@@ -263,7 +257,7 @@ def load_simple_data(sheet_name):
         st.error(f"'{sheet_name}' 에러: {e}")
         return pd.DataFrame()
 
-# --- 2. 상세(신구조문) 탭 데이터 로드 ---
+# --- 2. 상세(신구조문) 탭 데이터 로드 (중복 제거) ---
 @st.cache_data(ttl=10)
 def load_detail_data_by_gid(gid):
     try:
@@ -400,11 +394,9 @@ def render_detail_tab(df):
                 col1, col2, col3 = st.columns([4, 4, 3])
                 with col1:
                     st.markdown("##### ⬅️ 현행")
-                    # 현행 텍스트에도 자동 1줄 띄우기 포맷 적용
                     st.info(format_ui_text(row['현행']) if row['현행'] else "(내용 없음)")
                 with col2:
                     st.markdown("##### ➡️ 개정(안)")
-                    # 개정(안) 텍스트에 자동 1줄 띄우기 포맷 적용 (⑧, ⑨ 등 줄바꿈)
                     st.success(format_ui_text(row['개정(안)']) if row['개정(안)'] else "(내용 없음)")
                 with col3:
                     st.markdown("##### 📝 개정 사유")
