@@ -8,8 +8,8 @@ import time
 import re
 
 # --- 페이지 기본 설정 ---
-st.set_page_config(page_title="도시가스 공급규정 개정 이력 관리 시스템", layout="wide")
-st.title("📖 도시가스 공급규정 통합 관리 시스템")
+st.set_page_config(page_title="DSE_도시가스 공급규정 개정 이력 관리 시스템", layout="wide")
+st.title("📖 DSE_도시가스 공급규정 통합 관리 시스템")
 st.markdown("구글 스프레드시트(요약)와 깃허브 PDF(규정 전문)를 실시간 연동한 대시보드입니다.")
 
 # --- 구글 시트 및 PDF 파일 매핑 설정 ---
