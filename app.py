@@ -136,7 +136,7 @@ def highlight_differences(pdf_text, current_text, revised_text):
             if len(p_clean) >= 2:
                 p_clean_no_space = re.sub(r'\s+', '', p_clean)
                 if p_clean_no_space not in c_clean_for_match:
-                    p_clean_no_space = re.sub(r'[\'\"收藏“”‘’]', '', p_clean_no_space)
+                    p_clean_no_space = re.sub(r'[\'\"“”‘’]', '', p_clean_no_space)
                     if len(p_clean_no_space) > 2:
                         targets.append((p_clean_no_space, tag))
         else:
@@ -151,7 +151,7 @@ def highlight_differences(pdf_text, current_text, revised_text):
         if len(p_clean) >= 2:
             p_clean_no_space = re.sub(r'\s+', '', p_clean)
             if p_clean_no_space not in c_clean_for_match:
-                p_clean_no_space = re.sub(r'[\'\"收藏“”‘’]', '', p_clean_no_space)
+                p_clean_no_space = re.sub(r'[\'\"“”‘’]', '', p_clean_no_space)
                 if len(p_clean_no_space) > 2:
                     targets.append((p_clean_no_space, ""))
 
@@ -501,19 +501,16 @@ def render_detail_tab(df):
                 col1, col2, col3 = st.columns([4, 4, 3])
                 with col1:
                     st.markdown("##### ⬅️ 현행")
-                    # 3번째 탭과 완전히 일치하는 청색 커스텀 HTML 컨테이너 적용
                     st.markdown(f"""
                         <div style="background-color: #f0f6fc; border-left: 5px solid #1f6feb; padding: 12px; border-radius: 6px; white-space: pre-wrap; font-family: inherit; font-size: 14px; line-height: 1.6;">{format_ui_text(row['현행']) if row['현행'] else '(내용 없음)'}</div>
                     """, unsafe_allow_html=True)
                 with col2:
                     st.markdown("##### ➡️ 개정(안)")
-                    # 3번째 탭과 완전히 일치하는 녹색 커스텀 HTML 컨테이너 적용
                     st.markdown(f"""
                         <div style="background-color: #dafbe1; border-left: 5px solid #2ea44f; padding: 12px; border-radius: 6px; white-space: pre-wrap; font-family: inherit; font-size: 14px; line-height: 1.6;">{format_ui_text(row['개정(안)']) if row['개정(안)'] else '(내용 없음)'}</div>
                     """, unsafe_allow_html=True)
                 with col3:
                     st.markdown("##### 📝 개정 사유")
-                    # 3번째 탭과 완전히 일치하는 황색 커스텀 HTML 컨테이너 적용
                     st.markdown(f"""
                         <div style="background-color: #fff8c5; border-left: 5px solid #9e6a03; padding: 12px; border-radius: 6px; white-space: pre-wrap; font-family: inherit; font-size: 14px; line-height: 1.6;">{format_ui_text(row['개정 사유']) if row['개정 사유'] else '(내용 없음)'}</div>
                     """, unsafe_allow_html=True)
@@ -552,7 +549,7 @@ def render_detail_tab(df):
             
             st.markdown("<hr style='margin: 10px 0;'>", unsafe_allow_html=True)
 
-# --- 3. 2026년 list(pending issue) 탭 렌더링 ---
+# --- 3. 2026년 list(pending issue) 탭 렌더링 (수정된 부분) ---
 def render_pending_tab(df):
     st.markdown("### 📝 2026년 개정 대기 항목 (Pending Issues)")
     st.caption("마케팅본부 팀에서 수합 중인 내년도 개정 검토안 목록입니다.")
@@ -561,8 +558,15 @@ def render_pending_tab(df):
         st.info("현재 수합된 2026년 개정 대기 항목이 없거나 데이터를 불러오지 못했습니다.")
         return
         
+    selected_items = [] # 사용자가 선택한 항목을 담을 리스트
+
     for idx, row in df.iterrows():
         with st.container():
+            # 체크박스 추가: 기본적으로 모두 선택된 상태로 두며, 해제 시 출력물에서 제외됨
+            is_checked = st.checkbox(f"✅ 최종 출력물에 포함하기 (항목 {idx+1})", value=True, key=f"chk_pending_{idx}")
+            if is_checked:
+                selected_items.append(row)
+                
             col1, col2, col3 = st.columns([4, 4, 3])
             
             with col1:
@@ -585,6 +589,52 @@ def render_pending_tab(df):
                 """, unsafe_allow_html=True)
                 
         st.markdown("<hr style='margin: 10px 0;'>", unsafe_allow_html=True)
+
+    # --- 하단 PDF 다운로드 및 출력 기능 ---
+    st.markdown("### 🖨️ 개정 대기 항목 출력")
+    
+    if selected_items:
+        # 선택된 데이터들만 모아서 HTML 문서로 작성
+        html_content = """
+        <html>
+        <head>
+            <meta charset='utf-8'>
+            <title>2026년 도시가스 공급규정 개정 대기 항목</title>
+            <style>
+                body { font-family: 'Malgun Gothic', sans-serif; line-height: 1.6; color: #333; padding: 20px; }
+                .item-container { margin-bottom: 30px; page-break-inside: avoid; border: 1px solid #ddd; padding: 15px; border-radius: 8px; }
+                h2 { text-align: center; border-bottom: 2px solid #333; padding-bottom: 10px; margin-bottom: 30px; }
+                .box { padding: 12px; border-radius: 6px; margin-bottom: 10px; white-space: pre-wrap; }
+                .curr { background-color: #f0f6fc; border-left: 5px solid #1f6feb; }
+                .rev { background-color: #dafbe1; border-left: 5px solid #2ea44f; }
+                .reason { background-color: #fff8c5; border-left: 5px solid #9e6a03; }
+                h4 { margin-top: 0; margin-bottom: 8px; color: #555; }
+            </style>
+        </head>
+        <body>
+            <h2>2026년 도시가스 공급규정 개정 대기 항목 (선택분)</h2>
+        """
+        
+        for item in selected_items:
+            html_content += f"""
+            <div class="item-container">
+                <div class="box curr"><h4>현행</h4>{item['현행']}</div>
+                <div class="box rev"><h4>개정(안) 후보</h4>{item['개정(안)']}</div>
+                <div class="box reason"><h4>검토 및 개정 사유</h4>{item['개정 사유']}</div>
+            </div>
+            """
+            
+        html_content += "</body></html>"
+        
+        st.info("💡 **출력 팁:** 아래 버튼을 눌러 HTML 파일을 다운로드하신 뒤, 브라우저에서 열고 **[Ctrl + P]**를 눌러 'PDF로 저장'을 선택하시면 서식이 유지된 깔끔한 PDF를 얻으실 수 있습니다.")
+        st.download_button(
+            label="📥 선택한 항목 문서 다운로드 (HTML -> PDF 인쇄용)",
+            data=html_content,
+            file_name="2026_pending_issues_selected.html",
+            mime="text/html"
+        )
+    else:
+        st.warning("출력할 항목이 없습니다. 위의 리스트에서 최소 하나 이상의 항목을 선택해 주세요.")
 
 # --- 탭 실행 ---
 with tab1:
